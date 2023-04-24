@@ -3,7 +3,7 @@
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/205 
 
 ## Found by 
-bin2chen, n33k, hack3r-0m
+bin2chen, hack3r-0m, n33k
 
 ## Summary
 
@@ -159,12 +159,201 @@ index fae1b46..2811a6d 100644
              uint256 wntAmount = depositVault.recordTransferIn(wnt);
 ```
 
-# Issue H-2: Underestimated gas estimation for executing withdrawals leads to insufficient keeper compensation 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/4a5981a1f006468cd78dd974110d0a8be23b5fc9
+
+# Issue H-2: Incorrect function call leads to stale borrowing fees 
+
+Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/197 
+
+## Found by 
+0xAmanda
+
+## Summary
+Due to an incorrect function call while getting the total borrow fees, the returned fees will be an inaccurate and stale amount. Which will have an impact on liquidity providers
+
+
+## Vulnerability Detail
+
+As said the function  `getTotalBorrowingFees`:
+
+    function getTotalBorrowingFees(DataStore dataStore, address market, address longToken, address shortToken, bool isLong) internal view returns (uint256) {
+        uint256 openInterest = getOpenInterest(dataStore, market, longToken, shortToken, isLong);
+        uint256 cumulativeBorrowingFactor = getCumulativeBorrowingFactor(dataStore, market, isLong);
+        uint256 totalBorrowing = getTotalBorrowing(dataStore, market, isLong);
+        return openInterest * cumulativeBorrowingFactor - totalBorrowing;
+    }
+
+calculates the fess by calling  `getCumulativeBorrowingFactor(...)`:
+
+https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L1890
+
+which is the wrong function to call because it returns a stale borrowing factor. To get the actual borrowing factor and calculate correctly the borrowing fees, GMX should call the `getNextCumulativeBorrowingFactor` function:
+
+
+https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L1826
+
+
+Which makes the right calculation, taking into account the stale fees also:
+
+        uint256 durationInSeconds = getSecondsSinceCumulativeBorrowingFactorUpdated(dataStore, market.marketToken, isLong);
+        uint256 borrowingFactorPerSecond = getBorrowingFactorPerSecond(
+            dataStore,
+            market,
+            prices,
+            isLong
+        );
+
+        uint256 cumulativeBorrowingFactor = getCumulativeBorrowingFactor(dataStore, market.marketToken, isLong);
+
+        uint256 delta = durationInSeconds * borrowingFactorPerSecond;
+        uint256 nextCumulativeBorrowingFactor = cumulativeBorrowingFactor + delta;
+        return (nextCumulativeBorrowingFactor, delta);
+
+## Impact
+Ass fee calculation will not be accurate, liquidity providers will be have a less-worth token  because pending fees are not accounted in the pool's value
+
+
+## Code Snippet
+https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L1888
+
+## Tool used
+
+Manual Review
+
+## Recommendation
+
+In order to mitigate the issue, call the function `getNextCumulativeBorrowingFactor` instead of the function `getCumulativeBorrowingFactor()` for a correct accounting and not getting stale fees 
+
+
+
+## Discussion
+
+**IllIllI000**
+
+@xvi10 can you confirm that this is invalid?
+
+**xvi10**
+
+sorry thought i marked this, it is a valid issue
+
+**IllIllI000**
+
+@xvi10 can you elaborate on the conditions where this is a valid issue? Don’t most code paths call updateFundingAndBorrowingState() prior to fetching fees, so doesn’t that mean the value won’t be stale? I flagged the case where it’s missing in https://github.com/sherlock-audit/2023-02-gmx-judging/issues/158 . Are you saying that this is a separate issue, or that these should be combined, or something else?
+
+**xvi10**
+
+it affects the valuation of the market tokens for deposits / withdrawals
+
+**IllIllI000**
+
+@hrishibhat agree with sponsor – valid High
+
+**0xffff11**
+
+Escalate for 10 USDC
+
+It is a valid solo high. Sponsor confirmed the issue and severity.
+
+Re-explanation for better understanding:
+
+The function:
+
+     function getTotalBorrowingFees(DataStore dataStore, address market, address longToken, address shortToken, bool isLong) 
+    internal view returns (uint256) {
+     uint256 openInterest = getOpenInterest(dataStore, market, longToken, shortToken, isLong);
+      uint256 cumulativeBorrowingFactor = getCumulativeBorrowingFactor(dataStore, market, isLong);
+     uint256 totalBorrowing = getTotalBorrowing(dataStore, market, isLong);
+      return openInterest * cumulativeBorrowingFactor - totalBorrowing;
+     }
+
+is made to return the borrowingFees that are pending at that moment. The issue is that inside the `getTotalBorrowingFees` function, they are calling the wrong function to get the `cumulativeBorrowingFactor`.
+
+They are calling the function `cumulativeBorrowingFactor` instead of `getNextCumulativeBorrowingFactor.` , that is the one that should be called to get the updated borrowing fees. Calling the `cumulativeBorrowingFactor` returns the outdated fees.
+
+These `outdate` in fees can cause a missmatch in pricing specially while withdrawing, as sponsor confirmed.
+
+
+To sum up: Issue is completely valid, sponsor confirmed and enough issue has been given. Please make it a valid solo high, thanks IIIIIII!
+
+
+
+
+
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> It is a valid solo high. Sponsor confirmed the issue and severity.
+> 
+> Re-explanation for better understanding:
+> 
+> The function:
+> 
+>      function getTotalBorrowingFees(DataStore dataStore, address market, address longToken, address shortToken, bool isLong) 
+>     internal view returns (uint256) {
+>      uint256 openInterest = getOpenInterest(dataStore, market, longToken, shortToken, isLong);
+>       uint256 cumulativeBorrowingFactor = getCumulativeBorrowingFactor(dataStore, market, isLong);
+>      uint256 totalBorrowing = getTotalBorrowing(dataStore, market, isLong);
+>       return openInterest * cumulativeBorrowingFactor - totalBorrowing;
+>      }
+> 
+> is made to return the borrowingFees that are pending at that moment. The issue is that inside the `getTotalBorrowingFees` function, they are calling the wrong function to get the `cumulativeBorrowingFactor`.
+> 
+> They are calling the function `cumulativeBorrowingFactor` instead of `getNextCumulativeBorrowingFactor.` , that is the one that should be called to get the updated borrowing fees. Calling the `cumulativeBorrowingFactor` returns the outdated fees.
+> 
+> These `outdate` in fees can cause a missmatch in pricing specially while withdrawing, as sponsor confirmed.
+> 
+> 
+> To sum up: Issue is completely valid, sponsor confirmed and enough issue has been given. Please make it a valid solo high, thanks IIIIIII!
+> 
+> 
+> 
+> 
+> 
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**IllIllI000**
+
+I messed up the tagging - Valid solo High
+
+**hrishibhat**
+
+Escalation accepted
+
+Considering this issue a valid high
+
+**sherlock-admin**
+
+> Escalation accepted
+> 
+> Considering this issue a valid high
+
+This issue's escalations have been accepted!
+
+Contestants' payouts and scores will be updated according to the changes made on this issue.
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/89/files#diff-f764a51a3af5d3117eeeff219951425f3ecc8cd15b742bb044afc7c73b03f4aa
+
+# Issue H-3: Underestimated gas estimation for executing withdrawals leads to insufficient keeper compensation 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/195 
 
 ## Found by 
-rvierdiiev, bin2chen, berndartmueller, 0xAmanda
+0xAmanda, berndartmueller, bin2chen, rvierdiiev
 
 ## Summary
 
@@ -251,12 +440,131 @@ Manual Review
 
 Consider incorporating the token swaps in the gas estimation for withdrawal execution, similar to how it is done in the `GasUtils.estimateExecuteDepositGasLimit` function.
 
-# Issue H-3: ADL operations do not have any slippage protection 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/5cd83aaf9104aa6d826bc6676ac494e79db8cbd4
+
+# Issue H-4: Tracking of the latest ADL block use the wrong block number on Arbitrum 
+
+Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/150 
+
+## Found by 
+GalloDaSballo, IllIllI, ShadowForce
+
+## Summary
+
+Tracking of the latest ADL block use the wrong block number on Arbitrum
+
+
+## Vulnerability Detail
+
+The call to `setLatestAdlBlock()` passes in `block.timestamp`, which on Arbitrum, is the L1 block timestamp, not the L2 timestamp on which order timestamps are based.
+
+
+## Impact
+
+Tracking of whether ADL is currently required or not will be based on block numbers that are very far in the past (since Arbitrum block numbers are incremented much more quickly than Ethereum ones), so checks of whether ADL is enabled will pass, and the ADL keeper will be able to execute ADL orders whenever it wants to.
+
+
+## Code Snippet
+
+Uses `block.number` rather than [`Chain.currentBlockNumber()`](https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/chain/Chain.sol#L24-L30
+):
+```solidity
+// File: gmx-synthetics/contracts/adl/AdlUtils.sol : AdlUtils.updateAdlState()   #1
+
+104            MarketUtils.MarketPrices memory prices = MarketUtils.getMarketPrices(oracle, _market);
+105            (bool shouldEnableAdl, int256 pnlToPoolFactor, uint256 maxPnlFactor) = MarketUtils.isPnlFactorExceeded(
+106                dataStore,
+107                _market,
+108                prices,
+109                isLong,
+110                Keys.MAX_PNL_FACTOR
+111            );
+112    
+113            setIsAdlEnabled(dataStore, market, isLong, shouldEnableAdl);
+114 @>         setLatestAdlBlock(dataStore, market, isLong, block.number);
+115    
+116            emitAdlStateUpdated(eventEmitter, market, isLong, pnlToPoolFactor, maxPnlFactor, shouldEnableAdl);
+117:       }
+```
+https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/adl/AdlUtils.sol#L104-L117
+
+The block number (which is an L1 block number) is checked against the L2 oracle [block numbers](https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/adl/AdlUtils.sol#L192-L195).
+
+
+## Tool used
+
+Manual Review
+
+
+## Recommendation
+
+Use `Chain.currentBlockNumber()` as is done everywhere else in the code base
+
+
+
+## Discussion
+
+**Jiaren-tang**
+
+Escalate for 11 USDC. I think this should definitely be high. ADL should not be allowed to execute at any time, and if it does, it clearly the loss of fund. Because https://github.com/sherlock-audit/2023-02-gmx-judging/issues/143 is rewarded as high I think using wrong block.number allowing ADL operations to be executed when they are not supposed to be executed leads to loss of fund and deserves a high severity.
+
+**sherlock-admin**
+
+ > Escalate for 11 USDC. I think this should definitely be high. ADL should not be allowed to execute at any time, and if it does, it clearly the loss of fund. Because https://github.com/sherlock-audit/2023-02-gmx-judging/issues/143 is rewarded as high I think using wrong block.number allowing ADL operations to be executed when they are not supposed to be executed leads to loss of fund and deserves a high severity.
+
+You've created an escalation for 11 USDC, however, the escalation amount is fixed at 10 USDC.
+To update the escalation with the correct amount, please edit this comment. **(do not create a new comment)**
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**IllIllI000**
+
+I'm not sure about this one. I submitted as Medium because it's essentially a cap on profit, but as the escalator points out, slippage does create a loss. I'll leave this one to the Sherlock team to decide
+
+**hrishibhat**
+
+Escalation accepted
+
+Considering this issue a high based on the slippage reasoning.
+
+**sherlock-admin**
+
+> Escalation accepted
+> 
+> Considering this issue a high based on the slippage reasoning. 
+
+This issue's escalations have been accepted!
+
+Contestants' payouts and scores will be updated according to the changes made on this issue.
+
+**sherlock-admin**
+
+> Escalation accepted
+> 
+> Considering this issue a high based on the slippage reasoning.
+
+This issue's escalations have been accepted!
+
+Contestants' payouts and scores will be updated according to the changes made on this issue.
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/2129b82693b31ec698a100c6b38a7fadf6ec711b
+
+# Issue H-5: ADL operations do not have any slippage protection 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/143 
 
 ## Found by 
-IllIllI, Breeje
+Breeje, IllIllI
 
 ## Summary
 
@@ -308,12 +616,22 @@ Manual Review
 Introduce a `MAX_POSITION_IMPACT_FACTOR_FOR_ADL`, similar to `MAX_POSITION_IMPACT_FACTOR_FOR_LIQUIDATIONS`
 
 
-# Issue H-4: Keepers can be forced to waste gas with long revert messages 
+
+
+## Discussion
+
+**xvi10**
+
+The maximum price impact is capped by the MAX_POSITION_IMPACT_FACTOR value
+
+
+
+# Issue H-6: Keepers can be forced to waste gas with long revert messages 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/141 
 
 ## Found by 
-KingNFT, IllIllI, 0xAmanda
+0xAmanda, IllIllI, KingNFT
 
 ## Summary
 
@@ -359,7 +677,15 @@ Manual Review
 Count the gas three times during gas estimation
 
 
-# Issue H-5: Limit orders are broken when there are price gaps 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/b0bac262191f4f96edc9606192d2e4abfa043dc3
+
+# Issue H-7: Limit orders are broken when there are price gaps 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/140 
 
@@ -425,7 +751,15 @@ Manual Review
 Don't [revert](https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/exchange/OrderHandler.sol#L253) if both the primary and secondary prices are worse than the trigger price. Use the trigger price as the execution price.
 
 
-# Issue H-6: Malicious revert reasons with faked lengths can disrupt order execution 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/ec586b87cd677d6e0426000fb746613537027160#diff-d3ac89c96efb4157bb20ef7f24459de430ab4f29ffa8b39d92db13843e92c5a5
+
+# Issue H-8: Malicious revert reasons with faked lengths can disrupt order execution 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/139 
 
@@ -618,12 +952,20 @@ Have an upper limit on the length of a string that can be passed back, and manua
 
 
 
-# Issue H-7: User-supplied slippage for decrease orders is ignored 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/b0bac262191f4f96edc9606192d2e4abfa043dc3
+
+# Issue H-9: User-supplied slippage for decrease orders is ignored 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/138 
 
 ## Found by 
-rvierdiiev, IllIllI, berndartmueller, simon135
+IllIllI, berndartmueller, rvierdiiev, simon135
 
 ## Summary
 
@@ -697,7 +1039,15 @@ Manual Review
 `require()` that the final output amount is equal to the requested amount, after the position is [decreased](https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/order/DecreaseOrderUtils.sol#L38-L47) but before funds are transferred.
 
 
-# Issue H-8: Collateral cannot be claimed because there is no mechanism for the config keeper to change the claimable factor 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/108
+
+# Issue H-10: Collateral cannot be claimed because there is no mechanism for the config keeper to change the claimable factor 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/137 
 
@@ -761,12 +1111,20 @@ index 9bb382c..7696eb6 100644
 ```
 
 
-# Issue H-9: Collateral cannot be claimed due to inverted comparison condition 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/112
+
+# Issue H-11: Collateral cannot be claimed due to inverted comparison condition 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/136 
 
 ## Found by 
-IllIllI, rvierdiiev, berndartmueller, joestakey, drdr, stopthecap, float-audits
+IllIllI, berndartmueller, drdr, float-audits, joestakey, rvierdiiev, stopthecap
 
 ## Summary
 
@@ -825,12 +1183,20 @@ index 7624b69..67b167c 100644
 ```
 
 
-# Issue H-10: Fee receiver is given twice the amount of borrow fees it's owed 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/70
+
+# Issue H-12: Fee receiver is given twice the amount of borrow fees it's owed 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/135 
 
 ## Found by 
-rvierdiiev, IllIllI, float-audits
+IllIllI, float-audits, rvierdiiev
 
 ## Summary
 
@@ -903,7 +1269,15 @@ index c274e48..30bd6a8 100644
 ```
 
 
-# Issue H-11: Accounting breaks if end market appears multiple times in swap path 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/221d20776766123c8692882cc163809bf3ae311b
+
+# Issue H-13: Accounting breaks if end market appears multiple times in swap path 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/132 
 
@@ -961,12 +1335,20 @@ The `for`-loop calling `_swap()` already knows when it's processing the [last sw
 
 
 
-# Issue H-12: Pool value calculation uses wrong portion of the borrowing fees 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/101
+
+# Issue H-14: Pool value calculation uses wrong portion of the borrowing fees 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/131 
 
 ## Found by 
-IllIllI, 0xAmanda
+0xAmanda, IllIllI
 
 ## Summary
 
@@ -1029,7 +1411,15 @@ index 7624b69..bd006bf 100644
 ```
 
 
-# Issue H-13: Limit orders can be used to get a free look into the future 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/84
+
+# Issue H-15: Limit orders can be used to get a free look into the future 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/130 
 
@@ -1125,7 +1515,15 @@ Manual Review
 Require a delay between when the order was last increased/submitted, and when an update is allowed, similar to [REQUEST_EXPIRATION_BLOCK_AGE](https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/exchange/ExchangeUtils.sol#L24) for the cancellation of market orders
 
 
-# Issue H-14: Incomplete error handling causes execution and freezing/cancelling of Deposits/Withdrawals/Orders to fail. 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/111
+
+# Issue H-16: Incomplete error handling causes execution and freezing/cancelling of Deposits/Withdrawals/Orders to fail. 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/119 
 
@@ -1573,437 +1971,15 @@ VS Code, Foundry
 
 When parsing the revert reason, validate the offsets are smaller then the length of the encoding.
 
-# Issue H-15: Funding rate allows more tokens to be taken out than expected 
 
-Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/109 
 
-## Found by 
-float-audits
+## Discussion
 
-## Summary
+**xvi10**
 
-Current funding formula allows more tokens to be taken out by users who earning funding than what was deposited in by those users who paid the funding.
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/b0bac262191f4f96edc9606192d2e4abfa043dc3
 
-## Vulnerability Detail
-
-### Setup
-
-Config values:
-
--   fundingFactor
--   fundingExponentFactor
-
-Variable values before t<sub>0</sub>:
-```math
-\begin{align*}
-
-    \text{FAPS}_{l} &= \text{dataStore.getInt}(\text{Keys.fundingAmountPerSizeKey(market, collateralToken=longToken, isLong=true)}) \
-    \text{FAPS}_{s} &= \text{dataStore.getInt}(\text{Keys.fundingAmountPerSizeKey(market, collateralToken=longToken, isLong=false)}) \
-    \text{OI}_{Ll} &= \text{dataStore.getUint}(\text{Keys.openInterestKey(market, collateralToken=longToken, isLong=true)}) \
-    \text{OI}_{Ls} &= \text{dataStore.getUint}(\text{Keys.openInterestKey(market, collateralToken=longToken, isLong=false)}) \
-    \text{OI}_{Sl} &= \text{dataStore.getUint}(\text{Keys.openInterestKey(market, collateralToken=shortToken, isLong=true)}) \
-    \text{OI}_{Ss} &= \text{dataStore.getUint}(\text{Keys.openInterestKey(market, collateralToken=shortToken, isLong=false)}) \
-    \text{OI}_{l} &= \text{OI}_{Ll} + \text{OI}_{Sl} \
-    \text{OI}_{s} &= \text{OI}_{Ls} + \text{OI}_{Ss} \
-    \text{OI} &= \text{OI}_{l} + \text{OI}_{s}
-    \end{align*}
-```
-
-assume $\text{OI}_{l} \gt  \text{OI}\_{s}$ longs pay shorts
-
-assume time between each t<sub>i</sub> is the same
-
-
-<a id="orgc880f28"></a>
-
-## Time t<sub>0</sub>
-
-User1 & User2 create increase orders in same market.
-
-
-<a id="orgb74fbfa"></a>
-
-### User1 - long with long token collateral
-
-1.  Set funding variables
-
-Callpath:
-```solidity
-     OrderHandler.executeOrder
-     OrderUtils.executeOrder
-     IncreaseOrderUtils.processOrder
-     IncreasePositionUtils.increasePosition
-     PositionUtils.updateFundingAndBorrowingState
-     MarketUtils.updateFundingAmountPerSize
-```
-
-Calculate nextFundingAmountPerSize:
-
-```math
-\begin{align*}
-\text{diffUsd} &= \left|\text{OI}_{l} - \text{OI}_{s}\right| \\
-\text{fundingFactorPerSecond} &= \text{fundingFactor} \cdot \frac{\text{diffUsd}^{\text{fundingExponentFactor}}}{\text{OI}} \\
-\text{fundingUsd} &= \text{max}\left(\text{OI}_{l}, \text{OI}_{s}\right) \cdot \text{durationInSeconds} \cdot \text{fundingFactorPerSecond} \\
-\text{fundingUsdForLongCollateral} &= \text{fundingUsd} \cdot \frac{\text{OI}_{Ll}}{\text{OI}_{l}} \\
-\text{nextFundingAmountPerSize}_{\text{long}} &= \text{FAPS}_{l} + \frac{\text{fundingUsdForLongCollateral}}{\text{longTokenPrice.max} \cdot \text{OI}_{l}} \\
-\text{nextFundingAmountPerSize}_{\text{short}} &= \text{FAPS}_{s} - \frac{\text{fundingUsdForLongCollateral}}{\text{longTokenPrice.max} \cdot \text{OI}_{s}} \\
-\end{align*}
-```
-    
-Variables set:
-```math
-\begin{align*}
-\text{FAPS}_{l,t_0} &= \text{dataStore.setInt(Keys.fundingAmountPerSizeKey(market, collateralToken=longToken, isLong=true), value=nextFundingAmountPerSize<sub>long</sub>)} \\
-\text{FAPS}_{s,t_0} &= \text{dataStore.setInt(Keys.fundingAmountPerSizeKey(market, collateralToken=longToken, isLong=false), value=nextFundingAmountPerSize<sub>short</sub>)}
-\end{align*}
-```
- assume hasPendingLongTokenFundingFee = false
-
-2.  Set open interest variables
-
-Callpath:
-```solidity
-     OrderHandler.executeOrder
-     OrderUtils.executeOrder
-     IncreaseOrderUtils.processOrder
-     IncreasePositionUtils.increasePosition
-     PositionUtils.updateOpenInterest
-     MarketUtils.applyDeltaToOpenInterest
-```
-    
-Variables set:
-    
-```math
-\begin{aligned}
-   & \text{dataStore.applyDeltaToUint(Keys.openInterestKey(market, collateralToken=longToken, isLong=true), delta=order.sizeDeltaUsd)} \\
-    & \implies \text{OI}_{Ll,t0} = \text{OI}_{Ll} + \text{order.sizeDeltaUsd} \\
-    & \text{OI}_{l,t0} = \text{OI}_{Ll,t0} + \text{OI}_{Sl} = \text{OI}_{Ll} + \text{OI}_{Sl} + \text{order.sizeDeltaUsd} = \text{OI}_l + \text{user1.order.sizeDeltaUsd} \\
-    & \text{OI}_{s,t0} = \text{OI}_s \\
-    & \text{OI}_{t0} = \text{OI}_{l,t0} + \text{OI}_s
-\end{aligned}
-```
-
-3.  Set position variables
-
-Callpath:
-```solidity
-     OrderHandler.executeOrder
-     OrderUtils.executeOrder
-     IncreaseOrderUtils.processOrder
-     IncreasePositionUtils.increasePosition
-```
- 
-Variables set:
-
-```math
-\begin{align*}
-\text{position.setLongTokenFundingAmountPerSize(FAPS}_{l,t_0}\text{)} \\
-\text{U1.P.S}_{t_0} = \text{position.setSizeInUsd(order.sizeInUsd)}
-\end{align*}
-```
-
-### User2 - short with long token collateral
-
-1.  Set funding variables
-
-    durationInSeconds = 0 so no changes
-
-2.  Set open interest variables
-
-Callpath:
-```solidity
-     OrderHandler.executeOrder
-     OrderUtils.executeOrder
-     IncreaseOrderUtils.processOrder
-     IncreasePositionUtils.increasePosition
-     PositionUtils.updateOpenInterest
-     MarketUtils.applyDeltaToOpenInterest
-```
-
-Variables set:
-```math
-\begin{aligned}
-& \text{dataStore.applyDeltaToUint(Keys.openInterestKey(market, collateralToken=longToken, isLong=false), delta=order.sizeDeltaUsd)} \\
-& \implies \text{OI}_{\text{Ls},t_0} = \text{OI}_{\text{Ls}} + \text{order.sizeDeltaUsd} \\
-& \text{OI}_{\text{l},t_0} = \text{OI}_{\text{Ll},t_0} + \text{OI}_{\text{Sl}} = \text{OI}_{\text{Ll}} + \text{OI}_{\text{Sl}} + \text{user1.order.sizeDeltaUsd} = \text{OI}_{\text{l}} + \text{user1.order.sizeDeltaUsd} \\
-& \text{OI}_{\text{s},t0} = \text{OI}_{\text{Ls}} + \text{OI}_{\text{Ss}} = \text{OI}_{\text{Ls}} + \text{OI}_{\text{Ss}} + \text{order.sizeDeltaUsd} = \text{OI}_{\text{s}} + \text{order.sizeDeltaUsd} \\
-& \text{OI}_{t_0} = \text{OI}_{\text{l},t_0} + \text{OI}_{\text{s}}
-\end{aligned}
-```
-
-3.  Set position variables
-
-Variables set:
-```math
-\begin{aligned}
-& \text{position.setLongTokenFundingAmountPerSize(FAPS}_{s,t_0}\text{)} \\
-& \text{U2.P.S}_{t_0} = \text{position.setSizeInUsd(order.sizeInUsd)}
-\end{aligned}
-```
-
-
-## Time t<sub>1</sub>
-
-User1 creates decrease order to exit long position.
-
-
-### Set funding variables
-
-Callpath:
-```solidity
- OrderHandler.executeOrder
- OrderUtils.executeOrder
- DecreaseOrderUtils.processOrder
- DecreasePositionUtils.decreasePosition
- PositionUtils.updateFundingAndBorrowingState
- MarketUtils.updateFundingAmountPerSize
-```
-
-Calculate nextFundingAmountPerSize:
-
-```math
-\begin{aligned}
-& \text{diffUsd} = \left| \text{OI}_{l, t0} - \text{OI}_{s, t0} \right| \\
-& \text{fundingFactorPerSecond} = \text{fundingFactor} \cdot \text{diffUsd}^{\text{fundingExponentFactor}} / \text{OI}_{t0} \\
-& \text{fundingUsd} = \max\left(\text{OI}_{l, t0}, \text{OI}_{s, t0}\right) \cdot \text{durationInSeconds} \cdot \text{fundingFactorPerSecond} \\
-& \text{fundingUsdForLongCollateral} = \text{fundingUsd} \cdot \text{OI}_{Ll, t0} / \text{OI}_{l, t0} \\
-& \text{nextFundingAmountPerSize}_{\text{long}} = \text{FAPS}_{l, t0} + \text{fundingUsdForLongCollateral} / \left(\text{longTokenPrice.max} \cdot \text{OI}_{l, t0}\right) \\
-& \text{nextFundingAmountPerSize}_{\text{short}} = \text{FAPS}_{s, t0} - \text{fundingUsdForLongCollateral} / \left(\text{longTokenPrice.max} \cdot \text{OI}_{s, t0}\right)
-\end{aligned}
-```
-
-Variables set:
-```math
-\begin{align*}
-\text{FAPS}_{l,t_1} &= \text{dataStore.setInt(Keys.fundingAmountPerSizeKey(market, collateralToken=longToken, isLong=true), value=nextFundingAmountPerSize}_{\text{long}}\text{)} \\
-\text{FAPS}_{s,t_1} &= \text{dataStore.setInt(Keys.fundingAmountPerSizeKey(market, collateralToken=longToken, isLong=false), value=nextFundingAmountPerSize}_{\text{short}}\text{)}
-\end{align*}
-```
-
-assume hasPendingLongTokenFundingFee = false
-
-
-### Set open interest variables
-
-Callpath:
-```solidity
- OrderHandler.executeOrder
- OrderUtils.executeOrder
- DecreaseOrderUtils.processOrder
- DecreasePositionUtils.decreasePosition
- PositionUtils.updateOpenInterest
- MarketUtils.applyDeltaToOpenInterest
-```
-
-Variables set:
-```math
-\begin{aligned}
-& \text{dataStore.applyDeltaToUint(Keys.openInterestKey(market, collateralToken=longToken, isLong=false), delta=-order.sizeDeltaUsd)} \\
-& \implies \text{OI}_{\text{Ll},t1} = \text{OI}_{\text{Ll},t0} - \text{order.sizeDeltaUsd} \\
-& \text{OI}_{\text{l},t1} = \text{OI}_{\text{Ll},t1} + \text{OI}_{\text{Ls},t0} \\
-& \text{OI}_{\text{s},t1} = \text{OI}_{\text{s},t0} \\
-& \text{OI}_{t1} = \text{OI}_{\text{l},t1} + \text{OI}_{\text{s},t0}
-\end{aligned}
-```
-
-### Calculate funding fees
-
-Callpath:
-```solidity
- OrderHandler.executeOrder
- OrderUtils.executeOrder
- DecreaseOrderUtils.processOrder
- DecreasePositionUtils.decreasePosition
- DecreasePositionCollateralUtils.processCollateral
- PositionPricingUtils.getPositionFees
-```
-Variables set:
-```math
-\begin{aligned}
-    &\text{longTokenFundingFeeAmount} = \text{U1.P.S}_{t0} \cdot (\text{latestLongTokenFundingAmountPerSize} - \text{position.longTokenFundingAmountPerSize}) \\
-    &\implies \text{longTokenFundingFeeAmount} = \text{U1.P.S}_{t0} \cdot (\text{FAPS}_{\text{l},t1} - \text{FAPS}_{\text{l},t0})
-\end{aligned}
-
-```
-
-Note on: FAPS<sub>l</sub><sub>t1</sub> - FAPS<sub>l</sub><sub>t0</sub>
-```math
-\begin{aligned}
-    \text{FAPS}_{\text{l},t1} &= \text{FAPS}_{\text{l},t0} + \frac{\text{fundingUsdForLongCollateral}}{\text{longTokenPrice.max} \cdot \text{OI}_{\text{l},t0}} \\
-    &\implies \text{FAPS}_{\text{l},t1} - \text{FAPS}_{\text{l},t0} = \frac{\text{fundingUsdForLongCollateral}}{\text{longTokenPrice.max} \cdot \text{OI}_{\text{l},t0}} \\
-    &\implies \text{FAPS}_{\text{l},t1} - \text{FAPS}_{\text{l},t0} > 0 \\
-    &\implies \text{user pays funding}
-\end{aligned}
-```
-
-### Notes
-
-Since user pays funding:
-
--   longTokenFundingFeeAmount is subtracted from outputAmount, which is the number of tokens that will be sent back to the user, and so the funding fee tokens stay in the MarketToken contract.
--   longTokenFundingFeeAmount is subtracted from collateralAmount, so these tokens are not tracked anymore in any variables.
-
-
-<a id="org46a889d"></a>
-
-## Time t<sub>2</sub>
-
-User2 creates decrease order to exit everything.
-
-
-<a id="org801cccb"></a>
-
-### Set funding variables
-
-Callpath:
-```solidity
- OrderHandler.executeOrder
- OrderUtils.executeOrder
- DecreaseOrderUtils.processOrder
- DecreasePositionUtils.decreasePosition
- PositionUtils.updateFundingAndBorrowingState
- MarketUtils.updateFundingAmountPerSize
-```
-Calculate nextFundingAmountPerSize:
-```math
-\begin{aligned}
-    \text{diffUsd} &= |\text{OI}_{\text{l},t1} - \text{OI}_{\text{s},t1}| \\
-    \text{fundingFactorPerSecond} &= \text{fundingFactor} \cdot \frac{\text{diffUsd}^\text{fundingExponentFactor}}{\text{OI}_{t1}} \\
-    \text{fundingUsd} &= \max(\text{OI}_{\text{l},t1}, \text{OI}_{\text{s},t1}) \cdot \text{durationInSeconds} \cdot \text{fundingFactorPerSecond} \\
-    \text{fundingUsdForLongCollateral} &= \frac{\text{fundingUsd} \cdot \text{OI}_{\text{Ll},t1}}{\text{OI}_{\text{l},t1}} \\
-    \text{nextFundingAmountPerSize}_{\text{long}} &= \text{FAPS}_{\text{l},t1} + \frac{\text{fundingUsdForLongCollateral}}{\text{longTokenPrice.max} \cdot \text{OI}_{\text{l},t1}} \\
-    \text{nextFundingAmountPerSize}_{\text{short}} &= \text{FAPS}_{\text{s},t1} - \frac{\text{fundingUsdForLongCollateral}}{\text{longTokenPrice.max} \cdot \text{OI}_{\text{s},t1}}
-\end{aligned}
-```
-
-
-Variables set:
-```math
-\begin{align*}
-\text{FAPS}_{l,t2} &= \text{dataStore.setInt}\big(\text{Keys.fundingAmountPerSizeKey}(market, \text{collateralToken}=longToken, \text{isLong}=\text{true}), \text{value}= \text{nextFundingAmountPerSize}_{\text{long}}\big)\\
-\text{FAPS}_{s,t2} &= \text{dataStore.setInt}\big(\text{Keys.fundingAmountPerSizeKey}(market, \text{collateralToken}=longToken, \text{isLong}=\text{false}), \text{value}= \text{nextFundingAmountPerSize}_{\text{short}}\big)\\
-\end{align*}
-```
-
-assume hasPendingLongTokenFundingFee = false
-
-### Calculate funding fees
-
-Callpath:
-```solidity
- OrderHandler.executeOrder
- OrderUtils.executeOrder
- DecreaseOrderUtils.processOrder
- DecreasePositionUtils.decreasePosition
- DecreasePositionCollateralUtils.processCollateral
- PositionPricingUtils.getPositionFees
-```
-Variables set:
-
-```math
-\begin{align*}
-    &\text{longTokenFundingFeeAmount} = \text{U2.P.S}_{t0} \cdot (\text{latestLongTokenFundingAmountPerSize} - \text{position.longTokenFundingAmountPerSize}) \\
-    &\text{longTokenFundingFeeAmount} = \text{U2.P.S}_{t0} \cdot (\text{FAPS}_{s,t2} - \text{FAPS}_{s,t0}) \\
-\end{align*}
-```
-
-Note on: $\text{FAPS}_{s,t\_2} - \text{FAPS}\_{s,t\_0}$
-
-```math
-\begin{align*}
-    &\text{FAPS}_{s,t2} = \text{FAPS}_{s,t1} - \frac{\text{fundingUsdForLongCollateral}_{t2}}{\text{longTokenPrice}_{t2}\text{.max} \cdot \text{OI}_{s,t1}} \\
-    &\text{FAPS}_{s,t1} = \text{FAPS}_{s,t0} - \frac{\text{fundingUsdForLongCollateral}_{t1}}{\text{longTokenPrice}_{t1}\text{.max} \cdot \text{OI}_{s,t0}} \\
-    &\Rightarrow \text{FAPS}_{s,t2} - \text{FAPS}_{s,t0} = - \frac{\text{fundingUsdForLongCollateral}_{t2}}{\text{longTokenPrice}_{t2}\text{.max} \cdot \text{OI}_{s,t1}} - \frac{\text{fundingUsdForLongCollateral}_{t1}}{\text{longTokenPrice}_{t1}\text{.max} \cdot \text{OI}_{s,t0}} \\
-    &\Rightarrow \text{FAPS}_{s,t2} - \text{FAPS}_{s,t0} < 0 \\
-    &\Rightarrow \text{user gets funding} \\
-    &\Rightarrow \text{claimableLongTokenAmount} = |\text{longTokenFundingFeeAmount}|
-\end{align*}
-```
-
-<a id="org2509e2b"></a>
-
-### Update claimableCollateralAmount
-
-Callpath:
-```solidity
- OrderHandler.executeOrder
- OrderUtils.executeOrder
- DecreaseOrderUtils.processOrder
- DecreasePositionUtils.decreasePosition
- PositionUtils.incrementClaimableFundingAmount
- MarketUtils.incrementClaimableFundingAmount
-```
-Variables set:
-
-$\text{dataStore.incrementUint(Keys.claimableFundingAmountKey(market, token=longToken, account), delta=longTokenFundingFeeAmount)}$
-
-
-<a id="orgcadc1c7"></a>
-
-## Impact
-
-### Compare funding amounts for user1 and user2
-
-```math
-\begin{align*}
-\text{user1.longTokenFundingFeeAmount} &= \frac{\text{U1.P.S}_{t0} \times \text{fundingUsdForLongCollateral}_{t1}}{\text{longTokenPrice}_{t1}\text{.max} \times \text{OI}_{l,t0}} \\
-\text{user2.claimableLongTokenAmount} &= \left|\text{U2.P.S}_{t0} \times \left(-\frac{\text{fundingUsdForLongCollateral}_{t2}}{\text{longTokenPrice}_{t2}\text{.max} \times \text{OI}_{s,t1}} - \frac{\text{fundingUsdForLongCollateral}_{t1}}{\text{longTokenPrice}_{t1}\text{.max} \times \text{OI}_{s,t0}}\right)\right| \\
-&= \text{U2.P.S}_{t0} \times \left(\frac{\text{fundingUsdForLongCollateral}_{t2}}{\text{longTokenPrice}_{t2}\text{.max} \times \text{OI}_{s,t1}} + \frac{\text{fundingUsdForLongCollateral}_{t1}}{\text{longTokenPrice}_{t1}\text{.max} \times \text{OI}_{s,t0}}\right)
-\end{align*}
-```
-
-assume $\text{U1.P.S}\_{t\_0} = \text{U2.P.S}\_{t\_0} = S$
-
-then
-```math
-\begin{aligned}
-&\text{user2.claimableLongTokenAmount} - \text{user1.longTokenFundingFeeAmount} = \\ 
-&S \cdot \left(\frac{\text{fundingUsdForLongCollateral}_{t1}}{\text{longTokenPrice}_{t1}\text{.max}} \cdot \left(\frac{1}{\text{OI}_{s,t0}} - \frac{1}{\text{OI}_{l,t0}}\right) + \frac{\text{fundingUsdForLongCollateral}_{t2}}{\text{longTokenPrice}_{t2}\text{.max} \cdot \text{OI}_{s,t1}}\right)
-\end{aligned}
-```
-
-Expand the following variables
-
-```math
-\begin{align*}
-    OI_{l,t0} &= OI_{l} + \text{user1.order.sizeDeltaUsd} = OI_{l} + S \\
-    OI_{s,t0} &= OI_{s} + \text{user2.order.sizeDeltaUsd} = OI_{s} + S
-\end{align*}
-```
-
-longs pay shorts $\iff \text{OI}\_l > \text{OI}_s$
-
-So $\text{OI}\_{l,t\_0} > \text{OI}\_{s,t\_0}$
-
-So 
-```math
-\begin{equation}
-\frac{\text{fundingUsdForLongCollateral}_{t1}}{\text{longTokenPrice}_{t1}\text{.max}} \cdot \left( \frac{1}{\text{OI}_{s,t0}} - \frac{1}{\text{OI}_{l,t0}} \right) > 0
-\end{equation}
-```
-
-Also, clearly 
-```math
-\frac{\text{fundingUsdForLongCollateral}\_{t\_2}}{\text{longTokenPrice}\_{t\_2}\text{.max} \times \text{OI}\_{s,t\_1}} > 0
-```
-
-So we have a non-zero difference which means more tokens can be claimed by user2 than user1 provided.
-
-## Code Snippet
-
-LoC: https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L912-L1013
-
-## Tool used
-
-Manual Review
-
-## Recommendation
-
-Recommendation here is either
-- change funding formula so that no user can claim more tokens in form of funding that other users have provided.
-- alternatively have a backup pool that offers tokens when funding can't be paid entirely
-
-# Issue H-16: Incorrect `nextOpenInterest` values set for `priceImpact` 
+# Issue H-17: Incorrect `nextOpenInterest` values set for `priceImpact` 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/105 
 
@@ -2103,7 +2079,15 @@ And add these lines before `openInterestParams` assignment in `getNextOpenIntere
 `nextLongOpenInterest = isLong ? longOpenInterest + sizeDeltaUsd : longOpenInterest`
 `nextShortOpenInterest = !isLong ? shortOpenInterest + sizeDeltaUsd : shortOpenInterest`
 
-# Issue H-17: Incorrect parameter ordering in function call 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/b04edccc87babc619dd769c66b6af03313885bd3
+
+# Issue H-18: Incorrect parameter ordering in function call 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/97 
 
@@ -2183,12 +2167,20 @@ Manual Review
 
 Correct the ordering of parameters in function call made in `PositionUtils.sol` so that it aligns to that defined in the function signature in `MarketUtils.sol`
 
-# Issue H-18: No slippage for withdrawal without swapping path 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/3508caf10d1bda24f21e768e945494fd581c0986
+
+# Issue H-19: No slippage for withdrawal without swapping path 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/70 
 
 ## Found by 
-rvierdiiev
+bin2chen, rvierdiiev
 
 ## Summary
 No slippage for withdrawal without swapping path
@@ -2214,7 +2206,734 @@ Manual Review
 ## Recommendation
 You need to check that `minLongTokenAmount`, `minShortTokenAmount` is satisfied after the swap.
 
-# Issue H-19: Creating an order of type MarketIncrease opens an attack vector where attacker can execute txs with stale prices by inputting a very extense swapPath 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/7ca5adaacbeb717ae91badc250c56441fd86a417
+
+# Issue H-20: Unpaid funding fees from wrong calculation are going to be substracted from the pool 
+
+Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/67 
+
+## Found by 
+stopthecap
+
+## Summary
+
+The vulnerability start at the function getNextFundingAmountPerSize:
+
+ https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L912
+
+Basically, GMX is handling incorrectly the way on how they calculate the FundingFees to be paid because they calculate the amount using the `getOpenInterest` from both the short and long tokens.
+
+
+## Vulnerability Detail
+
+The detailed issue here is that GMX is incorrectly handling the calculation with the `getOpenInterest`  (the open Interest) of the two tokens, short and long.  They are dividing the `cache.fundingUsd`  for the interest of the two tokens:
+
+https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L953-L957
+
+After dividing, you get the `cache.fundingUsdForLongCollateral` which is basically the amount that has to be paid or paidTo for any of both collaterals and positions.
+
+That is a big problem in one case, when users need to pay those feed. When the user does have to pay the fundingFees. Because customers can only pay  those fundingFees for their collateral token, not for both.
+
+As said, this is not an issue when users do receive the fundingFees because you can claim both tokens, but it is an issue when paying the fees.
+
+This will result in less fundingFees being paid by users.
+
+## Impact
+2 Impacts:
+
+1:
+A missmatch in the pools accounting will occur over time which might have unexpected results in terms of insolvency's.
+
+2:
+High because users are not paying the fees that they should pay, so there is an economic damage. Specifically because the bug just described, does reduce the variable `fundingAmountPerSizePortion` : 
+
+https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L963-L966
+
+which is what user pays for the collateral token.   As said before, the amounts are being divided by the entire interest, therefore, just a small part only a portion of the FundingFees will be paid, meanwhile the entire amount can be claimed.
+## Code Snippet
+
+https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L912-L1013
+
+## Tool used
+
+Manual Review
+
+## Recommendation
+
+The way on how the funding fees are calculate for users that have to pay them has to change in a way that it is not calculated accounting all the open interest. The calculation of the funding fees for users that have to claim fundingFees, not necessarily has to change.
+
+
+
+## Discussion
+
+**0xffff11**
+
+Escalate for 10 USDC
+
+
+Issue is completely valid as a solo high. I see that my phrasing was not very clear which brought the issue to be excluded. 
+
+The problem here is that when calculating `getNextFundingAmountPerSize`   both  amount per size portion for long and short tokens are accounted https://github.com/sherlock-audit/2023-02-gmx/blob/b8f926738d1e2f4ec1173939caa51698f2c89631/gmx-synthetics/contracts/market/MarketUtils.sol#L953-L954
+
+Those fundingAmounts for long and short tokens are divided by the entire open interest:
+
+cache.fundingUsdForShortCollateral = cache.fundingUsd * cache.oi.shortOpenInterestWithShortCollateral / cache.oi.shortOpenInterest;
+
+There are 2 scenarios for these:
+
+1
+User are paid those fees, in which they would be paid entirely, because they are able to clame both, long and short tokens
+
+2
+User has to pay those funding fees. Users are only able to pay the `fundingAmountPerSizePortion` for their collateral token instead of both tokens, which reduces drastically the amount of `fundingAmountPerSizePortion` that the user will actually pay.
+
+To sum up. Not all the fees will be paid because you can only pay `fundingAmountPerSizePortion` for your collateral token, but actually all the `fundingAmountPerSizePortion`  can be claimed.
+
+
+To sum up the  `getNextFundingAmountPerSize` needs to differenciate calculations from those 2 cases to actually work as intended.
+
+As the issue enables paying less fees for portions because it is being used the entire open interest for calculation, there is an economic damage, therefore is a high
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> 
+> Issue is completely valid as a solo high. I see that my phrasing was not very clear which brought the issue to be excluded. 
+> 
+> The problem here is that when calculating `getNextFundingAmountPerSize`   both  amount per size portion for long and short tokens are accounted https://github.com/sherlock-audit/2023-02-gmx/blob/b8f926738d1e2f4ec1173939caa51698f2c89631/gmx-synthetics/contracts/market/MarketUtils.sol#L953-L954
+> 
+> Those fundingAmounts for long and short tokens are divided by the entire open interest:
+> 
+> cache.fundingUsdForShortCollateral = cache.fundingUsd * cache.oi.shortOpenInterestWithShortCollateral / cache.oi.shortOpenInterest;
+> 
+> There are 2 scenarios for these:
+> 
+> 1
+> User are paid those fees, in which they would be paid entirely, because they are able to clame both, long and short tokens
+> 
+> 2
+> User has to pay those funding fees. Users are only able to pay the `fundingAmountPerSizePortion` for their collateral token instead of both tokens, which reduces drastically the amount of `fundingAmountPerSizePortion` that the user will actually pay.
+> 
+> To sum up. Not all the fees will be paid because you can only pay `fundingAmountPerSizePortion` for your collateral token, but actually all the `fundingAmountPerSizePortion`  can be claimed.
+> 
+> 
+> To sum up the  `getNextFundingAmountPerSize` needs to differenciate calculations from those 2 cases to actually work as intended.
+> 
+> As the issue enables paying less fees for portions because it is being used the entire open interest for calculation, there is an economic damage, therefore is a high
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**IllIllI000**
+
+I'm having a hard time parsing what is being said, but it sounds like the submitter is worried that there won't be enough tokens to pay out funding fees until fees are deducted from actual positions. If that's what's being claimed, the way this is prevented is by having a [reserved amount](https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L1169-L1171) which has to be satisfied by depositors before any position increase is allowed. @xvi10 can you take a look and see if I'm missing something, or if the description of the issue is more clear to you?
+
+**xvi10**
+
+it seems to be a valid issue, i think the issue described is the same as MKTU-2 of https://github.com/GuardianAudits/Audits/blob/main/GMX/GMX_Synthetics_Audit_3.pdf
+
+**IllIllI000**
+
+I agree that this is the same issue described by MKTU-2, but I'm still not seeing what the problem is. `getNextFundingAmountPerSize()` updates the global information about funding for a market's collateral, not the funding fees for a specific position. I don't see any mathematical error in dividing by `cache.oi.longOpenInterest` since it equals `cache.oi.longOpenInterestWithLongCollateral + cache.oi.longOpenInterestWithShortCollateral`. The actual deduction of the funding fees is done separately in [`getFundingFees()`](https://github.com/sherlock-audit/2023-02-gmx/blob/b8f926738d1e2f4ec1173939caa51698f2c89631/gmx-synthetics/contracts/pricing/PositionPricingUtils.sol#L417-L444), where fees are deducted from the collateral held by the position. For example, if user A is long, user B is short with short collat, and user C is short with long collat, and the shorts have to pay longs, A claims collateral that B and C will pay their tokens for. As I mentioned above, user A can't create an OI position until market LPs have added enough tokens to cover any potential gains/losses, and this is enforced by 'reserved amount' checks during increases, decreases, and swaps. @xvi10, am I misunderstanding something here? Do you have access to the POC provided in MKTU-2? Can you provide it, e.g. in a gist so I can see what the exploit is?
+
+**xvi10**
+
+the PoC:
+
+```
+import { expect } from "chai";
+
+import { deployFixture } from "../../../utils/fixture";
+import { expandDecimals, decimalToFloat } from "../../../utils/math";
+import { getPoolAmount, getSwapImpactPoolAmount, getMarketTokenPrice } from "../../../utils/market";
+import { handleDeposit, getDepositCount } from "../../../utils/deposit";
+import { OrderType, getOrderCount, getOrderKeys, createOrder, executeOrder, handleOrder } from "../../../utils/order";
+import { getPositionCount, getAccountPositionCount, getPositionKeys } from "../../../utils/position";
+import { mine, time } from "@nomicfoundation/hardhat-network-helpers";
+import * as keys from "../../../utils/keys";
+
+describe("Guardian.MKTU-2", () => {
+  const { provider } = ethers;
+
+  let fixture;
+  let user0, user1, user2, user3;
+  let reader,
+    dataStore,
+    oracle,
+    depositVault,
+    ethUsdMarket,
+    ethUsdSpotOnlyMarket,
+    wnt,
+    wbtc,
+    usdc,
+    attackContract,
+    exchangeRouter,
+    eventEmitter,
+    ethEthMarket,
+    solEthEthMarket,
+    wbtcEthEthMarket;
+  let executionFee;
+  beforeEach(async () => {
+    fixture = await deployFixture();
+
+    ({ user0, user1, user2, user3 } = fixture.accounts);
+    ({
+      reader,
+      dataStore,
+      oracle,
+      depositVault,
+      ethUsdMarket,
+      ethUsdSpotOnlyMarket,
+      wnt,
+      wbtc,
+      usdc,
+      attackContract,
+      exchangeRouter,
+      eventEmitter,
+      ethEthMarket,
+      solEthEthMarket,
+      wbtcEthEthMarket,
+    } = fixture.contracts);
+    ({ executionFee } = fixture.props);
+
+    await handleDeposit(fixture, {
+      create: {
+        market: ethUsdMarket,
+        longTokenAmount: expandDecimals(1000, 18),
+        shortTokenAmount: expandDecimals(1000 * 5000, 6),
+      },
+    });
+    await handleDeposit(fixture, {
+      create: {
+        market: ethUsdSpotOnlyMarket,
+        longTokenAmount: expandDecimals(10000000, 18),
+        shortTokenAmount: expandDecimals(1000000 * 5000, 6),
+      },
+    });
+  });
+
+  it("CRITICAL: More claimable funding fees then paid", async () => {
+    await dataStore.setUint(keys.fundingFactorKey(ethUsdMarket.marketToken), decimalToFloat(1, 7));
+    await dataStore.setUint(keys.fundingExponentFactorKey(ethUsdMarket.marketToken), decimalToFloat(1));
+
+    // User0 MarketIncrease long position with long collateral for $100K
+    await handleOrder(fixture, {
+      create: {
+        account: user0,
+        market: ethUsdMarket,
+        initialCollateralToken: wnt,
+        initialCollateralDeltaAmount: expandDecimals(10, 18), // $50,000 in 10 ETH
+        swapPath: [],
+        sizeDeltaUsd: decimalToFloat(100 * 1000), // 2x Position
+        acceptablePrice: expandDecimals(5000, 12),
+        executionFee: expandDecimals(1, 15),
+        minOutputAmount: 0,
+        orderType: OrderType.MarketIncrease,
+        isLong: true,
+        shouldUnwrapNativeToken: false,
+      },
+    });
+
+    // User1 MarketIncrease short position with short collateral for $100K
+    await handleOrder(fixture, {
+      create: {
+        account: user1,
+        market: ethUsdMarket,
+        initialCollateralToken: usdc,
+        initialCollateralDeltaAmount: expandDecimals(50 * 1000, 6), // $50,000
+        swapPath: [],
+        sizeDeltaUsd: decimalToFloat(100 * 1000), // 2x Position
+        acceptablePrice: expandDecimals(5000, 12),
+        executionFee: expandDecimals(1, 15),
+        minOutputAmount: 0,
+        orderType: OrderType.MarketIncrease,
+        isLong: false,
+        shouldUnwrapNativeToken: false,
+      },
+    });
+
+    // User2 MarketIncrease short position with long collateral for $100K
+    await handleOrder(fixture, {
+      create: {
+        account: user2,
+        market: ethUsdMarket,
+        initialCollateralToken: wnt,
+        initialCollateralDeltaAmount: expandDecimals(10, 18), // $50,000
+        swapPath: [],
+        sizeDeltaUsd: decimalToFloat(100 * 1000), // 2x Position
+        acceptablePrice: expandDecimals(5000, 12),
+        executionFee: expandDecimals(1, 15),
+        minOutputAmount: 0,
+        orderType: OrderType.MarketIncrease,
+        isLong: false,
+        shouldUnwrapNativeToken: false,
+      },
+    });
+
+    // User3 MarketIncrease long with short collateral for $100K
+    await handleOrder(fixture, {
+      create: {
+        account: user3,
+        market: ethUsdMarket,
+        initialCollateralToken: usdc,
+        initialCollateralDeltaAmount: expandDecimals(100 * 1000, 6), // $100,000
+        swapPath: [],
+        sizeDeltaUsd: decimalToFloat(200 * 1000), // 2x Position
+        acceptablePrice: expandDecimals(5000, 12),
+        executionFee: expandDecimals(1, 15),
+        minOutputAmount: 0,
+        orderType: OrderType.MarketIncrease,
+        isLong: true,
+        shouldUnwrapNativeToken: false,
+      },
+    });
+
+    // Check that everyone has a position open
+    expect(await getAccountPositionCount(dataStore, user0.address)).eq(1);
+    expect(await getAccountPositionCount(dataStore, user1.address)).eq(1);
+    expect(await getAccountPositionCount(dataStore, user2.address)).eq(1);
+    expect(await getAccountPositionCount(dataStore, user3.address)).eq(1);
+    expect(await getPositionCount(dataStore)).eq(4);
+
+    // 300 days later
+    await time.increase(300 * 24 * 60 * 60);
+
+    const prices = {
+      indexTokenPrice: {
+        min: expandDecimals(5000, 12),
+        max: expandDecimals(5000, 12),
+      },
+      longTokenPrice: {
+        min: expandDecimals(5000, 12),
+        max: expandDecimals(5000, 12),
+      },
+      shortTokenPrice: {
+        min: expandDecimals(1, 24),
+        max: expandDecimals(1, 24),
+      },
+    };
+
+    const positionKeys = await getPositionKeys(dataStore, 0, 10);
+    const user0Position = await reader.getPositionInfo(dataStore.address, positionKeys[0], prices);
+    const user3Position = await reader.getPositionInfo(dataStore.address, positionKeys[3], prices);
+
+    // Total WNT FoundingFees paid by User0
+    const totalWNTFeesPaidByUser0 = await user0Position.pendingFundingFees.fundingFeeAmount;
+
+    // Total USDC FoundingFees paid by User3
+    const totalUSDCFeesPaidByUser3 = await user3Position.pendingFundingFees.fundingFeeAmount;
+
+    expect(await getOrderCount(dataStore)).to.eq(0);
+    expect(await wnt.balanceOf(user0.address)).to.eq(0);
+    expect(await wnt.balanceOf(user1.address)).to.eq(0);
+    expect(await wnt.balanceOf(user2.address)).to.eq(0);
+    expect(await wnt.balanceOf(user3.address)).to.eq(0);
+    expect(await usdc.balanceOf(user0.address)).to.eq(0);
+    expect(await usdc.balanceOf(user1.address)).to.eq(0);
+    expect(await usdc.balanceOf(user2.address)).to.eq(0);
+    expect(await usdc.balanceOf(user3.address)).to.eq(0);
+
+    // User0 MarketDecrease for the whole position size
+    await handleOrder(fixture, {
+      create: {
+        account: user0,
+        market: ethUsdMarket,
+        initialCollateralToken: wnt,
+        initialCollateralDeltaAmount: expandDecimals(10, 18), // $50,000
+        swapPath: [],
+        sizeDeltaUsd: decimalToFloat(100 * 1000), // 2x Position
+        acceptablePrice: expandDecimals(5000, 12),
+        executionFee: expandDecimals(1, 15),
+        minOutputAmount: 0,
+        orderType: OrderType.MarketDecrease,
+        isLong: true,
+        shouldUnwrapNativeToken: false,
+      },
+    });
+
+    // User1 MarketDecrease for the whole position size
+    await handleOrder(fixture, {
+      create: {
+        account: user1,
+        market: ethUsdMarket,
+        initialCollateralToken: usdc,
+        initialCollateralDeltaAmount: expandDecimals(50 * 1000, 6), // $50,000
+        swapPath: [],
+        sizeDeltaUsd: decimalToFloat(100 * 1000), // 2x Position
+        acceptablePrice: expandDecimals(5000, 12),
+        executionFee: expandDecimals(1, 15),
+        minOutputAmount: 0,
+        orderType: OrderType.MarketDecrease,
+        isLong: false,
+        shouldUnwrapNativeToken: false,
+      },
+    });
+
+    // User2 MarketDecrease for the whole position size
+    await handleOrder(fixture, {
+      create: {
+        account: user2,
+        market: ethUsdMarket,
+        initialCollateralToken: wnt,
+        initialCollateralDeltaAmount: expandDecimals(10, 18), // $50,000
+        swapPath: [],
+        sizeDeltaUsd: decimalToFloat(100 * 1000), // 2x Position
+        acceptablePrice: expandDecimals(5000, 12),
+        executionFee: expandDecimals(1, 15),
+        minOutputAmount: 0,
+        orderType: OrderType.MarketDecrease,
+        isLong: false,
+        shouldUnwrapNativeToken: false,
+      },
+    });
+
+    // User3 MarketDecrease for the whole position size
+    await handleOrder(fixture, {
+      create: {
+        account: user3,
+        market: ethUsdMarket,
+        initialCollateralToken: usdc,
+        initialCollateralDeltaAmount: expandDecimals(100 * 1000, 6), // $100,000
+        swapPath: [],
+        sizeDeltaUsd: decimalToFloat(200 * 1000), // 2x Position
+        acceptablePrice: expandDecimals(5000, 12),
+        executionFee: expandDecimals(1, 15),
+        minOutputAmount: 0,
+        orderType: OrderType.MarketDecrease,
+        isLong: true,
+        shouldUnwrapNativeToken: false,
+      },
+    });
+
+    // Check total wnt funding fees paid by User0
+    expect(totalWNTFeesPaidByUser0).eq("3455997333333400000");
+
+    // Check total usdc funding fees paid by User3
+    expect(totalUSDCFeesPaidByUser3).eq("69120000000");
+
+    // Check User1's claimable funding fees
+    expect(
+      await dataStore.getUint(keys.claimableFundingAmountKey(ethUsdMarket.marketToken, wnt.address, user1.address))
+    ).to.eq("5183999266666700000");
+    expect(
+      await dataStore.getUint(keys.claimableFundingAmountKey(ethUsdMarket.marketToken, usdc.address, user1.address))
+    ).to.eq("51840000000");
+
+    // Check User2's claimable funding fees
+    expect(
+      await dataStore.getUint(keys.claimableFundingAmountKey(ethUsdMarket.marketToken, wnt.address, user2.address))
+    ).to.eq("5183999266666700000");
+    expect(
+      await dataStore.getUint(keys.claimableFundingAmountKey(ethUsdMarket.marketToken, usdc.address, user2.address))
+    ).to.eq("51840000000");
+
+    // Check User0 has less balance than initially, e.g. User0 paid funding fees in WNT
+    expect(await wnt.balanceOf(user0.address)).to.lt(expandDecimals(10, 18));
+
+    // Check User3 has less balance than initially, e.g. User3 paid funding fees in USDC
+    expect(await usdc.balanceOf(user3.address)).to.lt(expandDecimals(1000 * 1000, 6));
+
+    // First we'll showcase that there is more WNT funding fee to be claimed the being paid, under that test we'll showcase that there is more USDC funding fee to be claimed then being paid
+
+    // TEST more claimable WNT funding fees then paid
+    const totalFeeAmountPaidWNT = BigInt(totalWNTFeesPaidByUser0);
+
+    // Get total of claimable funding fees from User1 and User2
+    const claimableWNTUser1 = await dataStore.getUint(
+      keys.claimableFundingAmountKey(ethUsdMarket.marketToken, wnt.address, user1.address)
+    );
+    const claimableWNTUser2 = await dataStore.getUint(
+      keys.claimableFundingAmountKey(ethUsdMarket.marketToken, wnt.address, user2.address)
+    );
+    const totalClaimableFeesWNT = BigInt(claimableWNTUser1) + BigInt(claimableWNTUser2);
+
+    // When funding fees are paid by the long side, each token per size value is divided amongst the total long open interest, but not every long position is capable of paying out the fees for either collateral tokens
+
+    // Check that the total amount of fees claimable is more the total fees paid
+    expect(totalClaimableFeesWNT).to.gt(totalFeeAmountPaidWNT);
+
+    // TEST more claimable USDC funding fees then paid
+    const totalFeeAmountPaidUSDC = BigInt(totalUSDCFeesPaidByUser3);
+
+    // Get total of claimable funding fees from User1 and User2
+    const claimableUSDCUser1 = await dataStore.getUint(
+      keys.claimableFundingAmountKey(ethUsdMarket.marketToken, usdc.address, user1.address)
+    );
+    const claimableUSDCUser2 = await dataStore.getUint(
+      keys.claimableFundingAmountKey(ethUsdMarket.marketToken, usdc.address, user2.address)
+    );
+    const totalClaimableFeesUSDC = BigInt(claimableUSDCUser1) + BigInt(claimableUSDCUser2);
+
+    // When funding fees are paid by the short side, each token per size value is divided amongst the total short open interest, but not every short position is capable of paying out the fees for either collateral tokens
+
+    // Check that the total amount of fees claimable is more the the total fees paid
+    expect(totalClaimableFeesUSDC).to.gt(totalFeeAmountPaidUSDC);
+
+    // Check there is no open positions
+    expect(await getAccountPositionCount(dataStore, user0.address)).eq(0);
+    expect(await getAccountPositionCount(dataStore, user1.address)).eq(0);
+    expect(await getAccountPositionCount(dataStore, user2.address)).eq(0);
+    expect(await getAccountPositionCount(dataStore, user3.address)).eq(0);
+    expect(await getPositionCount(dataStore)).eq(0);
+  });
+});```
+
+**IllIllI000**
+
+While the title of the issue, and the non-code parts of the summary are correct, the vulnerability detail and part of the impact are not correct. As I described above, there is no mathematical issue with the area of the code that the submitter links to, and the actual funding calculation is done elsewhere as I mention. However, there _is_ still an adjustment needed in the per-size values, which is described in MKTU-2, but is not described in this submission. Essentially, while the full open interest division is correct, that amount is later converted to per-share units, which should have taken into account the collateral of the position, so that when it's multiplied later in `getFundingFees()`, we get the right amount. As is seen in the fix applied by the sponsor, the area of the code that the submitter points to [remains unmodified](https://github.com/gmx-io/gmx-synthetics/blob/e6102b306d0488ba3dd71facd53bea4df74987db/contracts/market/MarketUtils.sol#L1047-L1051), and the adjustment that MKTU-2 describes is done [later](https://github.com/gmx-io/gmx-synthetics/blob/e6102b306d0488ba3dd71facd53bea4df74987db/contracts/market/MarketUtils.sol#L1062-L1064). The patch I'm providing below shows that only the MKTU-2 adjustment is needed in order for the `distribute short` amounts to match the `pay short` amount (I commented out the long portion of the test, because including both makes the test run into contract size issues):
+
+```diff
+diff --git a/gmx-synthetics/contracts/market/MarketUtils.sol b/gmx-synthetics/contracts/market/MarketUtils.sol
+index 7624b69..70399b2 100644
+--- a/gmx-synthetics/contracts/market/MarketUtils.sol
++++ b/gmx-synthetics/contracts/market/MarketUtils.sol
+@@ -960,12 +960,15 @@ library MarketUtils {
+         // use Precision.FLOAT_PRECISION here because fundingUsdForLongCollateral or fundingUsdForShortCollateral divided by longTokenPrice
+         // will give an amount in number of tokens which may be quite a small value and could become zero after being divided by longOpenInterest
+         // the result will be the amount in number of tokens multiplied by Precision.FLOAT_PRECISION per 1 USD of size
+-        cache.fps.fundingAmountPerSizePortion_LongCollateral_LongPosition = getPerSizeValue(cache.fundingUsdForLongCollateral / prices.longTokenPrice.max, cache.oi.longOpenInterest);
++        //cache.fps.fundingAmountPerSizePortion_LongCollateral_LongPosition = getPerSizeValue(cache.fundingUsdForLongCollateral / prices.longTokenPrice.max, cache.oi.longOpenInterest);
+         cache.fps.fundingAmountPerSizePortion_LongCollateral_ShortPosition = getPerSizeValue(cache.fundingUsdForLongCollateral / prices.longTokenPrice.max, cache.oi.shortOpenInterest);
+-        cache.fps.fundingAmountPerSizePortion_ShortCollateral_LongPosition = getPerSizeValue(cache.fundingUsdForShortCollateral / prices.shortTokenPrice.max, cache.oi.longOpenInterest);
++        //cache.fps.fundingAmountPerSizePortion_ShortCollateral_LongPosition = getPerSizeValue(cache.fundingUsdForShortCollateral / prices.shortTokenPrice.max, cache.oi.longOpenInterest);
+         cache.fps.fundingAmountPerSizePortion_ShortCollateral_ShortPosition = getPerSizeValue(cache.fundingUsdForShortCollateral / prices.shortTokenPrice.max, cache.oi.shortOpenInterest);
+-
++	
+         if (result.longsPayShorts) {
++	    cache.fps.fundingAmountPerSizePortion_LongCollateral_LongPosition = getPerSizeValue(cache.fundingUsdForLongCollateral / prices.longTokenPrice.max, cache.oi.longOpenInterestWithLongCollateral);
++	    cache.fps.fundingAmountPerSizePortion_ShortCollateral_LongPosition = getPerSizeValue(cache.fundingUsdForShortCollateral / prices.shortTokenPrice.max, cache.oi.longOpenInterestWithShortCollateral);
++
+             // longs pay shorts
+             result.fundingAmountPerSize_LongCollateral_LongPosition = Calc.boundedAdd(
+                 result.fundingAmountPerSize_LongCollateral_LongPosition,
+@@ -987,6 +990,9 @@ library MarketUtils {
+                 cache.fps.fundingAmountPerSizePortion_ShortCollateral_ShortPosition.toInt256()
+             );
+         } else {
++	    //cache.fps.fundingAmountPerSizePortion_LongCollateral_ShortPosition = getPerSizeValue(cache.fundingUsdForLongCollateral / prices.longTokenPrice.max, cache.oi.shortOpenInterestWithLongCollateral);
++	    //cache.fps.fundingAmountPerSizePortion_ShortCollateral_ShortPosition = getPerSizeValue(cache.fundingUsdForShortCollateral / prices.shortTokenPrice.max, cache.oi.shortOpenInterestWithShortCollateral);
++
+             // shorts pay longs
+             result.fundingAmountPerSize_LongCollateral_LongPosition = Calc.boundedSub(
+                 result.fundingAmountPerSize_LongCollateral_LongPosition,
+diff --git a/gmx-synthetics/contracts/pricing/PositionPricingUtils.sol b/gmx-synthetics/contracts/pricing/PositionPricingUtils.sol
+index c274e48..d807bae 100644
+--- a/gmx-synthetics/contracts/pricing/PositionPricingUtils.sol
++++ b/gmx-synthetics/contracts/pricing/PositionPricingUtils.sol
+@@ -13,7 +13,7 @@ import "./PricingUtils.sol";
+ 
+ import "../referral/IReferralStorage.sol";
+ import "../referral/ReferralUtils.sol";
+-
++import "hardhat/console.sol";
+ // @title PositionPricingUtils
+ // @dev Library for position pricing functions
+ library PositionPricingUtils {
+@@ -405,7 +405,7 @@ library PositionPricingUtils {
+         address shortToken,
+         int256 latestLongTokenFundingAmountPerSize,
+         int256 latestShortTokenFundingAmountPerSize
+-    ) internal pure returns (PositionFundingFees memory) {
++    ) internal view returns (PositionFundingFees memory) {
+         PositionFundingFees memory fundingFees;
+ 
+         fundingFees.latestLongTokenFundingAmountPerSize = latestLongTokenFundingAmountPerSize;
+@@ -425,24 +425,36 @@ library PositionPricingUtils {
+             position.shortTokenFundingAmountPerSize(),
+             position.sizeInUsd()
+         );
+-
++console.log("sender: ", tx.origin);
++//console.log("  fundingAPS long");
++//console.logInt(latestLongTokenFundingAmountPerSize);
++console.log("  fundingAPS short");
++console.logInt(latestShortTokenFundingAmountPerSize);
++//console.log("  long: ");
++//console.logInt(longTokenFundingFeeAmount);
++console.log("  short:");
++console.logInt(shortTokenFundingFeeAmount);
+         // if the position has negative funding fees, distribute it to allow it to be claimable
+         if (longTokenFundingFeeAmount < 0) {
+             fundingFees.claimableLongTokenAmount = (-longTokenFundingFeeAmount).toUint256();
++//console.log("  distribute long");
+         }
+ 
+         if (shortTokenFundingFeeAmount < 0) {
+             fundingFees.claimableShortTokenAmount = (-shortTokenFundingFeeAmount).toUint256();
++console.log("  distribute short");
+         }
+ 
+         if (position.collateralToken() == longToken && longTokenFundingFeeAmount > 0) {
+             fundingFees.fundingFeeAmount = longTokenFundingFeeAmount.toUint256();
++//console.log("  pay long");
+         }
+ 
+         if (position.collateralToken() == shortToken && shortTokenFundingFeeAmount > 0) {
+             fundingFees.fundingFeeAmount = shortTokenFundingFeeAmount.toUint256();
++console.log("  pay short");
+         }
+-
++console.log("end\n");
+         return fundingFees;
+     }
+ 
+```
+
+output:
+```text
+...
+sender:  0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266
+  fundingAPS short
+10368
+  short:
+1036800000
+end
+
+sender:  0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266
+  fundingAPS short
+-10368
+  short:
+-1036800000
+  distribute short
+end
+
+sender:  0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266
+  fundingAPS short
+-10368
+  short:
+-1036800000
+  distribute short
+end
+
+sender:  0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266
+  fundingAPS short
+10368
+  short:
+2073600000
+  pay short
+end
+...
+```
+
+`-1036800000 + -1036800000 + 2073600000 = 0`
+
+If there had been another submission in the contest where I could have marked this as a duplicate, I would have done so, so I'm leaning towards this being a valid High. However, because the submission did not actually identify the right problem and didn't provide any test showing that they weren't just guessing that there was _some sort of_ problem in this area, I'm not sure if this qualifies for a solo high, and will leave the decision to the Sherlock team
+
+**IllIllI000**
+
+Upon further inspection, I believe that there is another submission that is describing the MKTU-2 issue correctly, and that's #109. In the section they label with `Calculate nextFundingAmountPerSize:`, they properly include the per-size adjustment, and they properly trace propagation of the incomplete adjustment from `updateFundingAmountPerSize()` to the later call to `getPositionFees()`. They don't explicitly say that the issue is with the per-size adjustment, but the math they provide shows that the amount paid is not the same as the amount withdrawn. Again, this current issue doesn't properly describe the area of the problem, so I would say that it's either a duplicate of #109, or invalid
+
+**xvi10**
+
+i don't think it is the same issue as https://github.com/sherlock-audit/2023-02-gmx-judging/issues/109, the issue in 109 is due to rounding i believe
+
+for this issue, the description is correct, i think the code referenced in "https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L963-L966" is to describe that the incorrect calculation affects these variables
+
+the Code Snippet covers the code that should be updated
+
+
+
+**IllIllI000**
+
+@xvi10, just so I understand what you're saying about this current issue, do you agree that I've described the shortcomings of this finding correctly, but disagree that it should be invalid, or are you saying something else? With the fix to the area of the code that you changed, are you seeing some other issue not covered by the test?
+
+Separately, for 109, can you elaborate on how/where it's due to rounding, and point to the change you've made in the code to address it?
+
+**xvi10**
+
+i think that the issue should be valid
+
+the issue mentioned:
+
+"High because users are not paying the fees that they should pay, so there is an economic damage. Specifically because the bug just described, does reduce the variable fundingAmountPerSizePortion :
+
+https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/market/MarketUtils.sol#L963-L966"
+
+the reporter mentions that the fundingAmountPerSizePortion values will be affected which is correct
+
+for 109, the fix for the rounding issue: https://github.com/gmx-io/gmx-synthetics/commit/8e5c776546b1eb3da46ae824119f6c797354a640
+
+**IllIllI000**
+
+They do mention `fundingAmountPerSizePortion`, but the adjustment is in each `fundingAmountPerSizePortion_*Collateral_*Position`, not in the raw `fundingAmountPerSizePortion`. They do mention a problem that ended up being shown to be valid, and I believe that by the Sherlock rules, it doesn't matter that it may not have described every aspect, and it should count as a High
+
+For 109 can you point to where in the issue they refer to a rounding issue, or what step of the math shows it?
+
+**xvi10**
+
+for 109, they don't mention it as a rounding issue, but i believe the difference in amount paid vs amount claimed can be fixed by fixing the rounding 
+
+**IllIllI000**
+
+@xvi10 Why is it not the same issue as the one described here? Wouldn't their tracing of the various calls made in this issue point to the same issue? What in their description made it seem like a rounding issue instead? Their submission doesn't mention units of precision anywhere
+
+**xvi10**
+
+this issue only affects the case where positions are opened with different types of collateral, because the calculation:
+
+```
+        cache.fps.fundingAmountPerSizePortion_LongCollateral_LongPosition = getPerSizeValue(cache.fundingUsdForLongCollateral / prices.longTokenPrice.max, cache.oi.longOpenInterest);
+
+        cache.fps.fundingAmountPerSizePortion_ShortCollateral_LongPosition = getPerSizeValue(cache.fundingUsdForShortCollateral / prices.shortTokenPrice.max, cache.oi.longOpenInterest);
+```
+
+would be affected, since it should be 
+
+```
+        cache.fps.fundingAmountPerSizePortion_LongCollateral_LongPosition = getPerSizeValue(cache.fundingUsdForLongCollateral / prices.longTokenPrice.max, cache.oi.longOpenInterestWithLongCollateral);
+
+        cache.fps.fundingAmountPerSizePortion_ShortCollateral_LongPosition = getPerSizeValue(cache.fundingUsdForShortCollateral / prices.shortTokenPrice.max, cache.oi.longOpenInterestWithShortCollateral);
+
+```
+
+e.g. if all positions used the long token as collateral, then cache.oi.longOpenInterest == cache.oi.longOpenInterestWithLongCollateral and fundingUsdForShortCollateral would be zero 
+
+in the example given in https://github.com/sherlock-audit/2023-02-gmx-judging/issues/109, all positions use the same collateral so it is not the same issue 
+
+as mentioned, 109 does not describe the issue as a rounding issue, just that it possible for the amount claimable to be larger than the amount paid or pending to be paid, fixing the rounding would prevent this from occurring 
+
+
+**IllIllI000**
+
+I agree that this issue requires that collaterals be different, and 109 does not describe that
+
+@xvi10 I do not see how the fix provided for #109 makes one or the other of the inequalities at the end of the submission always negative, which I believe would be required for that issue to be resolved, but I'll take another look. Please let me know if you've already figured it out
+
+**xvi10**
+
+would it be possible to get clarification from the reporter on this?
+
+**hrishibhat**
+
+Escalation accepted
+
+Based on the above discussions. Considering this issue a valid high
+
+**sherlock-admin**
+
+> Escalation accepted
+> 
+> Based on the above discussions. Considering this issue a valid high
+
+This issue's escalations have been accepted!
+
+Contestants' payouts and scores will be updated according to the changes made on this issue.
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/abd2396da096a08fdb7d77a6328b42396cc6149c
+
+# Issue H-21: Creating an order of type MarketIncrease opens an attack vector where attacker can execute txs with stale prices by inputting a very extense swapPath 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/54 
 
@@ -2534,6 +3253,52 @@ There need to be a way to cap the length of the path to control user input:
 uint y = 10;
 require(swapPath.length < y ,"path too long");
 
+
+
+## Discussion
+
+**hack3r-0m**
+
+Escalate for 10 USDC
+
+this should be medium because owner set conservative limit via `ESTIMATED_GAS_FEE_MULTIPLIER_FACTOR` and completly prevent this.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> this should be medium because owner set conservative limit via `ESTIMATED_GAS_FEE_MULTIPLIER_FACTOR` and completly prevent this.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**IllIllI000**
+
+This issue is about being able to use the block.gaslimit, not anything having to do with the keeper gas estimation
+
+**hrishibhat**
+
+Escalation rejected
+
+This is a valid issue
+
+**sherlock-admin**
+
+> Escalation rejected
+> 
+> This is a valid issue
+
+This issue's escalations have been rejected!
+
+Watsons who escalated this issue will have their escalation amount deducted from their next payout.
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/d4066840f925c43116eed3c2c83ae2e44be39eed#diff-f764a51a3af5d3117eeeff219951425f3ecc8cd15b742bb044afc7c73b03f4aaR2010
+
 # Issue M-1: If block range it big and adl dosnt use currentblock in the order it will cause issues 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/216 
@@ -2578,6 +3343,8 @@ Manual Review
 
 make it `chain.currentBLock`
 
+
+
 ## Discussion
 
 **xvi10**
@@ -2595,8 +3362,6 @@ i think the impact is minimized if there is at least one honest ADL keeper, if a
 **IllIllI000**
 
 It sounds like ADL keepers are not fully trusted and therefore this is an unlikely, but possible risk
-
-
 
 # Issue M-2: [M-01] Incorrect refund of execution fee to user 
 
@@ -2645,13 +3410,89 @@ In DepositHandler.sol, for `executeDeposit` it is recommended that `startingGas(
 Alternatively, in GasUtils.sol, gasUsed could be computed with 63/64 of startingGas, in order to obtain the correct refund amount to the user. This would also apply to Withdraw and Order executions which have similar code flows.
 ![image](https://user-images.githubusercontent.com/83704326/227539740-4df5497a-709d-4e4c-ad00-ab492fc5b74c.png)
 
+
+
 ## Discussion
 
 **xvi10**
 
 this is a valid concern but we do not think this requires a change in the contracts, startingGas is measured after withOraclePrices, so there will be some extra gas consumed for that call, additionally the keeper should be incentivised with a small fee to execute the requests, the value for Keys.EXECUTION_GAS_FEE_BASE_AMOUNT can be adjusted to account for these
 
+**Jiaren-tang**
 
+Escalate for 10 USDC. I do not recommend escalating this issue for a reward of 10 USDC, as the impact is too trivial. According to the protocol's comments, not forwarding 1/64th of the gas to compensate for the execution fee does not block order flow execution, and Keys.EXECUTION_GAS_FEE_BASE_AMOUNT can be configured to easily solve this issue.
+
+Furthermore, based on Sherlock's severity guide:
+
+https://docs.sherlock.xyz/audits/judging/judging
+
+> a Medium severity rating should only be given if there is a viable scenario (even if unlikely) that could cause the protocol to enter a state where a material amount of funds can be lost. The attack path is possible with assumptions that either mimic on-chain conditions or reflect conditions that have a reasonable chance of becoming true in the future. The more expensive the attack is for an attacker, the less likely it will be included as a Medium (holding all other factors constant). The vulnerability must be something that is not considered an acceptable risk by a reasonable protocol team.
+
+Based on the protocol's comment, this issue is clearly considered an acceptable risk by a reasonable protocol team. Therefore, I do not believe it meets the criteria for a Medium severity rating.
+@xvi10 @IllIllI000
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC. I do not recommend escalating this issue for a reward of 10 USDC, as the impact is too trivial. According to the protocol's comments, not forwarding 1/64th of the gas to compensate for the execution fee does not block order flow execution, and Keys.EXECUTION_GAS_FEE_BASE_AMOUNT can be configured to easily solve this issue.
+> 
+> Furthermore, based on Sherlock's severity guide:
+> 
+> https://docs.sherlock.xyz/audits/judging/judging
+> 
+> > a Medium severity rating should only be given if there is a viable scenario (even if unlikely) that could cause the protocol to enter a state where a material amount of funds can be lost. The attack path is possible with assumptions that either mimic on-chain conditions or reflect conditions that have a reasonable chance of becoming true in the future. The more expensive the attack is for an attacker, the less likely it will be included as a Medium (holding all other factors constant). The vulnerability must be something that is not considered an acceptable risk by a reasonable protocol team.
+> 
+> Based on the protocol's comment, this issue is clearly considered an acceptable risk by a reasonable protocol team. Therefore, I do not believe it meets the criteria for a Medium severity rating.
+> @xvi10 @IllIllI000
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**chewonithard**
+
+Escalate for 10 USDC. I opine that the issue is valid and should be retained for award.
+1. The protocol has acknowledged this as a valid issue.
+2. While no code change is needed, the protocol said they can adjust Keys.EXECUTION_GAS_FEE_BASE_AMOUNT to account for this -- indicating there was an issue in the first place which needs to be fixed
+3. Keeper is already incentivsed through a defined fee see [link](https://github.com/gmx-io/gmx-synthetics/blob/main/contracts/gas/GasUtils.sol#L50), therefore this additional gas that the user has to pay for is unintended and should be remedied. Given the popularity of the protocol, the aggregate amount of gas users will be overpaying for is significant
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC. I opine that the issue is valid and should be retained for award.
+> 1. The protocol has acknowledged this as a valid issue.
+> 2. While no code change is needed, the protocol said they can adjust Keys.EXECUTION_GAS_FEE_BASE_AMOUNT to account for this -- indicating there was an issue in the first place which needs to be fixed
+> 3. Keeper is already incentivsed through a defined fee see [link](https://github.com/gmx-io/gmx-synthetics/blob/main/contracts/gas/GasUtils.sol#L50), therefore this additional gas that the user has to pay for is unintended and should be remedied. Given the popularity of the protocol, the aggregate amount of gas users will be overpaying for is significant
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**IllIllI000**
+
+I agree with the [second](https://github.com/sherlock-audit/2023-02-gmx-judging/issues/212#issuecomment-1495786878) escalation for its stated reasons. In addition, if the swap path is long enough, the base fee may not be large enough to cover the number of swaps
+
+**hrishibhat**
+
+Escalation accepted
+
+Considering this issue as valid based on Sponsor, 2nd Escalation and Lead Watson comments. 
+
+**sherlock-admin**
+
+> Escalation accepted
+> 
+> Considering this issue as valid based on Sponsor, 2nd Escalation and Lead Watson comments. 
+
+This issue's escalations have been accepted!
+
+Contestants' payouts and scores will be updated according to the changes made on this issue.
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/119
 
 # Issue M-3: A single precision value may not work for both the min and max prices 
 
@@ -2711,6 +3552,8 @@ Manual Review
 Provide separate precision values for min and max prices
 
 
+
+
 ## Discussion
 
 **xvi10**
@@ -2741,8 +3584,6 @@ In case the precision difference required is too large, e.g. 2 decimals or more,
 **xvi10**
 
 agree that confirmed and no-fix would be a more accurate label
-
-
 
 # Issue M-4: Liquidation shouldn't be used to close positions that were fully-collateralized prior to collateral requirement changes 
 
@@ -2799,6 +3640,8 @@ Manual Review
 Close the position with a market order, rather than liquidating it, if the user was previously above the minimum with the old factor
 
 
+
+
 ## Discussion
 
 **xvi10**
@@ -2814,8 +3657,6 @@ this setting should eventually be removed from the Config contract
 **xvi10**
 
 yes, updated to confirmed
-
-
 
 # Issue M-5: Negative prices will cause old orders to be canceled 
 
@@ -2874,12 +3715,82 @@ Manual Review
 Create a new error type, and include it in the list of `OracleUtils.isEmptyPriceError()` errors
 
 
+
+
+## Discussion
+
+**hack3r-0m**
+
+Escalate for 10 USDC
+
+This finding should be invalid, in "Impact" section, author mentions:
+> Orders to close positions will be canceled, leading to losses.
+
+If price is negative, cancelling of order should be desired outcome.
+
+author mentions:
+> Negative Chainlink oracle prices (think negative interest rates in Europe)
+
+this is not 1:1 comparison, here sign of interest rate is compared with sign of asset and both are completly different things
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This finding should be invalid, in "Impact" section, author mentions:
+> > Orders to close positions will be canceled, leading to losses.
+> 
+> If price is negative, cancelling of order should be desired outcome.
+> 
+> author mentions:
+> > Negative Chainlink oracle prices (think negative interest rates in Europe)
+> 
+> this is not 1:1 comparison, here sign of interest rate is compared with sign of asset and both are completly different things
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**sherlock-admin**
+
+> Escalate for 10 USDC
+> 
+> This finding should be invalid, because keepers are trusted entity as mentioned in `REAMDE` and signature of keeper on longest chain cannot be used on forks because of check that only keeper can update price.
+
+You've deleted an escalation for this issue.
+
+**IllIllI000**
+
+Asset prices [can in fact go negative](https://www.bbc.com/news/business-52350082) due to carying costs, and the sponsor confirmed the issue
+
+**hrishibhat**
+
+Escalation rejected
+
+Although unlikely the possibility of this must be addressed instead of canceling it. 
+
+**sherlock-admin**
+
+> Escalation rejected
+> 
+> Although unlikely the possibility of this must be addressed instead of canceling it. 
+
+This issue's escalations have been rejected!
+
+Watsons who escalated this issue will have their escalation amount deducted from their next payout.
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/113
+
 # Issue M-6: Delayed orders won't use correct prices 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/176 
 
 ## Found by 
-ShadowForce, IllIllI, rvierdiiev
+IllIllI, ShadowForce, rvierdiiev
 
 ## Summary
 
@@ -2943,6 +3854,14 @@ Manual Review
 Don't use Chainlink oracle for anything, and instead rely on the archive oracles for everything
 
 
+
+
+## Discussion
+
+**xvi10**
+
+This is a valid issue, but we have decided to leave the option to use Chainlink prices in the contracts in case those price feeds are needed
+
 # Issue M-7: `EmptyFeedPrice` will cause orders to be canceled 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/175 
@@ -2999,12 +3918,20 @@ Manual Review
 Include `EmptyFeedPrice` in the list of `OracleUtils.isEmptyPriceError()` errors
 
 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/4a5981a1f006468cd78dd974110d0a8be23b5fc9#diff-d1cd88df390b68e193ecd449d918fbfccb8c24f39cbb3f4c32a659e932122d8fR291
+
 # Issue M-8: Insufficient oracle validation 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/174 
 
 ## Found by 
-IllIllI, rvierdiiev, Breeje, ShadowForce, PRAISE
+Breeje, IllIllI, PRAISE, ShadowForce, rvierdiiev
 
 ## Summary
 
@@ -3047,12 +3974,20 @@ Manual Review
 Add a staleness threshold number of seconds configuration parameter, and ensure that the price fetched is within that time range
 
 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/113
+
 # Issue M-9: Gas spikes after outages may prevent order execution 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/173 
 
 ## Found by 
-ShadowForce, IllIllI, simon135
+IllIllI, ShadowForce, simon135
 
 ## Summary
 
@@ -3104,13 +4039,13 @@ Manual Review
 Allow the user to update the execution fee without changing the order timestamp if the `tx.gasprice` of the update transaction is above some threshold/execution fee factor 
 
 
+
+
 ## Discussion
 
 **xvi10**
 
 this is a valid concern but we do not think the contracts should be changed to add this feature, instead keepers may be reimbursed through a keeper fund or the protocol may run keepers that are willing to execute the transactions even if the execution fee will not be fully reimbursed
-
-
 
 # Issue M-10: Insufficient funding fee rounding protection 
 
@@ -3162,6 +4097,14 @@ Manual Review
 
 Track fractional amounts even when the amount is not equal to zero
 
+
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/115
 
 # Issue M-11: Positions can still be liquidated even if orders to prevent it can't execute 
 
@@ -3224,6 +4167,14 @@ Manual Review
 
 Keep user collateral at a separate address from the pool address, so that liquidations have to do an actual transfer which may revert, rather than just updating internal accounting
 
+
+
+## Discussion
+
+**xvi10**
+
+This should be a very rare case, we believe that it may not make sense to force doing a transfer to handle this case, liquidations should instead be manually disabled if this were to happen, it may also be possible to do this automatically with a contract function that anyone can invoke and if transfers are verified to not be working then the contract has access to disable liquidations for that market, for the current scope this feature will not be added 
+
 # Issue M-12: When underlying collateral tokens are paused, orders can't be canceled 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/167 
@@ -3284,12 +4235,20 @@ Manual Review
 Do not send the collateral back during the cancel - have another separate 'claim' function for it
 
 
+
+
+## Discussion
+
+**xvi10**
+
+This should be a very rare case, for the current scope this feature will not be added
+
 # Issue M-13: Orders with single-sided deposits that are auto-adjusted, always revert 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/165 
 
 ## Found by 
-IllIllI, kirk-baird, berndartmueller, joestakey, hack3r-0m, drdr, koxuan, float-audits
+IllIllI, berndartmueller, drdr, float-audits, hack3r-0m, joestakey, kirk-baird, koxuan
 
 ## Summary
 
@@ -3350,12 +4309,20 @@ index 03467e4..915c7fe 100644
              if (diff < poolLongTokenAmount) {
 ```
 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/d4066840f925c43116eed3c2c83ae2e44be39eed
+
 # Issue M-14: Single-sided deposits that are auto-adjusted may have their collateral value cut in half 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/164 
 
 ## Found by 
-rvierdiiev, IllIllI, joestakey, koxuan
+IllIllI, joestakey, koxuan, rvierdiiev
 
 ## Summary
 
@@ -3419,6 +4386,14 @@ index 03467e4..1a96f47 100644
 ```
 
 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/d4066840f925c43116eed3c2c83ae2e44be39eed
+
 # Issue M-15: Malicious order keepers can trigger the cancellation of any order, with old blocks 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/163 
@@ -3475,6 +4450,14 @@ Manual Review
 ## Recommendation
 
 Add checks for these errors, and make the functions result in a revert rather than a cancellation
+
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/4a5981a1f006468cd78dd974110d0a8be23b5fc9#diff-d1cd88df390b68e193ecd449d918fbfccb8c24f39cbb3f4c32a659e932122d8fR291
 
 # Issue M-16: Limit orders are unnecessarily delayed by a block 
 
@@ -3556,6 +4539,14 @@ Manual Review
 Allow a price that is separate from the primary and secondary prices, to come before the order block, and allow the primary/secondary prices to equal the order block
 
 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/111
+
 # Issue M-17: Slippage is not respected if PnL swap associated with a decrease order fails 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/159 
@@ -3605,6 +4596,14 @@ Manual Review
 
 Calculate whether the USD value of `outputToken` is equivalent to the `minOutputAmount` expected by the order, and revert if it's less than required
 
+
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/108
 
 # Issue M-18: Global position-fee-related state not updated until _after_ liquidation checks are done 
 
@@ -3661,6 +4660,14 @@ Manual Review
 
 Call `PositionUtils.updateFundingAndBorrowingState()` before all checks
 
+
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/0821228d2333b5a689d9361bafa806f51c56fbc1
 
 # Issue M-19: Position fees are still assessed even if the ability to decrease positions is disabled 
 
@@ -3738,6 +4745,8 @@ Manual Review
 Track and account for disabling, and adjust position fees based on whether things were paused or not.
 
 
+
+
 ## Discussion
 
 **xvi10**
@@ -3745,8 +4754,6 @@ Track and account for disabling, and adjust position fees based on whether thing
 this is a valid concern, but we do not think this logic should be added
 
 orders should only be disabled if there is an emergency issue, we do not think the additional complexity is worth adding for this case
-
-
 
 # Issue M-20: Positions cannot be liquidated once the oracle prices are zero 
 
@@ -3825,6 +4832,8 @@ Manual Review
 Provide a mechanism for positions to be liquidated even if the price reaches zero
 
 
+
+
 ## Discussion
 
 **xvi10**
@@ -3851,7 +4860,49 @@ agree on that, i'm not sure if it is worth the complexity to handle a zero price
 
 some calculations such as position.sizeInTokens would not make sense if the price is zero or negative so I believe the contracts in the current state cannot support these values and the markets would need to be manually settled
 
+**hack3r-0m**
 
+Escalate for 10 USDC
+
+This issue should be invalid, because of how unlikely this is to be happen. A same argument (with similiar unlikely odds) can be made that positions cannot be liquidated if ethereum goes down as a network.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This issue should be invalid, because of how unlikely this is to be happen. A same argument (with similiar unlikely odds) can be made that positions cannot be liquidated if ethereum goes down as a network.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**IllIllI000**
+
+`There is a viable scenario (even if unlikely)` https://docs.sherlock.xyz/audits/judging/judging . This is a valid risk and is easily protected against. CEX securities go to zero all the time, and as crypto grows and ages, the same will become true for DAO tokens
+
+**hrishibhat**
+
+Escalation rejected
+
+Although unlikely, a zero price should not break the liquidations. 
+Considering this a valid medium
+
+**sherlock-admin**
+
+> Escalation rejected
+> 
+> Although unlikely, a zero price should not break the liquidations. 
+> Considering this a valid medium
+
+This issue's escalations have been rejected!
+
+Watsons who escalated this issue will have their escalation amount deducted from their next payout.
+
+**xvi10**
+
+this is a valid issue, but as mentioned the market needs to be manually settled as some calculations may not make sense for zero or negative values
 
 # Issue M-21: Trades in blocks where the bid or ask drops to zero will be priced using the previous block's price 
 
@@ -3914,6 +4965,8 @@ Manual Review
 Use an actual sentinel flag rather than overloading the meaning of a 'zero' price.
 
 
+
+
 ## Discussion
 
 **xvi10**
@@ -3936,7 +4989,47 @@ the readme states that `Oracle signers are expected to accurately report the pri
 
 replied in https://github.com/sherlock-audit/2023-02-gmx-judging/issues/156
 
+**hack3r-0m**
 
+Escalate for 10 USDC
+
+should be dup of https://github.com/sherlock-audit/2023-02-gmx-judging/issues/156 instead of seperate issue
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> should be dup of https://github.com/sherlock-audit/2023-02-gmx-judging/issues/156 instead of seperate issue
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**IllIllI000**
+
+looks like I missed this one. The fix for this one does not resolve the other. One is about using the wrong price, and the other is about an unhandled revert case
+
+**hrishibhat**
+
+Escalation rejected
+
+Although related to the similar topic but Not a duplicate of #156 
+
+**sherlock-admin**
+
+> Escalation rejected
+> 
+> Although related to the similar topic but Not a duplicate of #156 
+
+This issue's escalations have been rejected!
+
+Watsons who escalated this issue will have their escalation amount deducted from their next payout.
+
+**xvi10**
+
+no code changed, similar reason to https://github.com/sherlock-audit/2023-02-gmx-judging/issues/156
 
 # Issue M-22: PnL is incorrectly counted as collateral when determining whether to close positions automatically 
 
@@ -3994,6 +5087,14 @@ Manual Review
 
 Do not count PnL as part of the collateral, for the purposes of determining the minimum position collateral amount. The combined value may still be useful as a separate check.
 
+
+
+
+## Discussion
+
+**xvi10**
+
+PnL is counted as collateral to allow position increases / decreases if the pnl is sufficient to cover pending fees, the risk of the position having insufficient pnl to cover fees in case of a large change in price is similar to the risk of a position having insufficient collateral to cover fees 
 
 # Issue M-23: Missing checks for whether a position is still an ADL candidate 
 
@@ -4067,6 +5168,8 @@ Manual Review
 Create a view function for whether the position is eligible for ADL, and revert if the user is not eligible when the order executes
 
 
+
+
 ## Discussion
 
 **xvi10**
@@ -4086,8 +5189,6 @@ this behaviour could be incentivised off-chain through rewarding keepers proport
 **IllIllI000**
 
 I'm Keeping this open since the argument is complexity rather than optimal behavior
-
-
 
 # Issue M-24: Oracles are vulnerable to cross-chain replay attacks 
 
@@ -4143,12 +5244,58 @@ Manual Review
 Include the `block.chainid` in the signature, separately from the `SALT`, and ensure that the value is looked up each time
 
 
+
+
+## Discussion
+
+**hack3r-0m**
+
+Escalate for 10 USDC
+
+This finding should be invalid, because keepers are trusted entity as mentioned in REAMDE and signature of keeper on longest chain cannot be used on forks because of check that only keeper can update price.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> This finding should be invalid, because keepers are trusted entity as mentioned in REAMDE and signature of keeper on longest chain cannot be used on forks because of check that only keeper can update price.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**IllIllI000**
+
+The readme says, `Order keepers and frozen order keepers could potentially extract value through transaction ordering, delayed transaction execution etc, this will be partially mitigated with a keeper network` so they are not fully-trusted entities
+
+**hrishibhat**
+
+Escalation rejected
+
+Admin is restricted and keepers are trusted only to perform the actions assigned to them. As pointed out by the Lead watson, Keepers are not fully trusted entities
+
+**sherlock-admin**
+
+> Escalation rejected
+> 
+> Admin is restricted and keepers are trusted only to perform the actions assigned to them. As pointed out by the Lead watson, Keepers are not fully trusted entities
+
+This issue's escalations have been rejected!
+
+Watsons who escalated this issue will have their escalation amount deducted from their next payout.
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/113
+
 # Issue M-25: Missing checks for whether Arbitrum Sequencer is active 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/151 
 
 ## Found by 
-IllIllI, hack3r-0m, 0xdeadbeef, ShadowForce, GalloDaSballo
+0xdeadbeef, GalloDaSballo, IllIllI, ShadowForce, hack3r-0m
 
 ## Summary
 
@@ -4194,135 +5341,15 @@ Manual Review
 
 Use a [chainlink oracle](https://blog.chain.link/how-to-use-chainlink-price-feeds-on-arbitrum/#almost_done!_meet_the_l2_sequencer_health_flag) to determine whether the sequencer is offline or not, and don't allow orders to be executed while the sequencer is offline.
 
-# Issue M-26: Tracking of the latest ADL block use the wrong block number on Arbitrum 
-
-Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/150 
-
-## Found by 
-ShadowForce, IllIllI, GalloDaSballo
-
-## Summary
-
-Tracking of the latest ADL block use the wrong block number on Arbitrum
-
-
-## Vulnerability Detail
-
-The call to `setLatestAdlBlock()` passes in `block.timestamp`, which on Arbitrum, is the L1 block timestamp, not the L2 timestamp on which order timestamps are based.
-
-
-## Impact
-
-Tracking of whether ADL is currently required or not will be based on block numbers that are very far in the past (since Arbitrum block numbers are incremented much more quickly than Ethereum ones), so checks of whether ADL is enabled will pass, and the ADL keeper will be able to execute ADL orders whenever it wants to.
-
-
-## Code Snippet
-
-Uses `block.number` rather than [`Chain.currentBlockNumber()`](https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/chain/Chain.sol#L24-L30
-):
-```solidity
-// File: gmx-synthetics/contracts/adl/AdlUtils.sol : AdlUtils.updateAdlState()   #1
-
-104            MarketUtils.MarketPrices memory prices = MarketUtils.getMarketPrices(oracle, _market);
-105            (bool shouldEnableAdl, int256 pnlToPoolFactor, uint256 maxPnlFactor) = MarketUtils.isPnlFactorExceeded(
-106                dataStore,
-107                _market,
-108                prices,
-109                isLong,
-110                Keys.MAX_PNL_FACTOR
-111            );
-112    
-113            setIsAdlEnabled(dataStore, market, isLong, shouldEnableAdl);
-114 @>         setLatestAdlBlock(dataStore, market, isLong, block.number);
-115    
-116            emitAdlStateUpdated(eventEmitter, market, isLong, pnlToPoolFactor, maxPnlFactor, shouldEnableAdl);
-117:       }
-```
-https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/adl/AdlUtils.sol#L104-L117
-
-The block number (which is an L1 block number) is checked against the L2 oracle [block numbers](https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/adl/AdlUtils.sol#L192-L195).
-
-
-## Tool used
-
-Manual Review
-
-
-## Recommendation
-
-Use `Chain.currentBlockNumber()` as is done everywhere else in the code base
-
-# Issue M-27: Disabling of markets can be front-run for risk-free trades 
-
-Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/148 
-
-## Found by 
-IllIllI
-
-## Summary
-
-Disabling of markets can be front-run for risk-free trades
-
-
-## Vulnerability Detail
-
-If a user with a large position open sees that a market's executions are being disabled (e.g. a scheduled maintenance window), the user can front-run it with a limit order to exit the position. If they happen in the same block, there is no way for an order keeper to execute the order before the disable happens. Up until the market is re-enabled, the user has a free option to cancel the order at any time if they see that the position loses any money.
-
-
-## Impact
-
-The trader is able to get a free look into the future and decide whether to let the position run, or to exit. This is more advantageous than having a stoploss, because with a stop, if the price later recovers, then you've missed out on the recovery. In this scenario, the trader can see all subsequent history, and then make a decision. If the trader makes a gain, this is necessarily at the expense of another user.
-
-
-## Code Snippet
-
-Orders while the feature is disabled, revert if the keeper tries to execute them, which means they're executed later after the market is re-enabled:
-
-```solidity
-// File: gmx-synthetics/contracts/exchange/OrderHandler.sol : OrderHandler._handleOrderError()   #1
-
-248                if (
-249 @>                 errorSelector == FeatureUtils.DisabledFeature.selector ||
-250                    errorSelector == PositionUtils.EmptyPosition.selector ||
-251                    errorSelector == BaseOrderUtils.InvalidOrderPrices.selector
-252                ) {
-253                    ErrorUtils.revertWithCustomError(reasonBytes);
-254                }
-```
-https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/exchange/OrderHandler.sol#L248-L254
-
-
-## Tool used
-
-Manual Review
-
-
-## Recommendation
-
-For cases where the order currently reverts with `DisabledFeature`, create another order state, similar to frozen, where the order is marked with the current block number to indicated that it _would_ have been executed at that block, but otherwise remains paused, so that later it can be re-executed by a keeper once the market is re-enabled. Once an order reaches this new state, it shouldn't be cancellable.
 
 
 ## Discussion
 
 **xvi10**
 
-orders should only be disabled in an emergency, possibly creation of orders should be disabled during this time as well
+This is a valid issue, the risk will be reduced with a keeper network instead of a separate check
 
-**IllIllI000**
-
-@xvi10, I believe your `possibly` indicates that this finding has given you new information that you are able to work around via non-code fixes, is that right? Trying to confirm so that Sherlock can decide whether this type of issue is rewardable or not
-
-**xvi10**
-
-i'm not sure what would what be an accurate way to term it, this report would be a reminder to update the documentation that order creation should be disabled if order execution is disabled, so there is no code change but there is documentation improvement
-
-**IllIllI000**
-
-I'm leaving this as open for now, since in other contests requiring a specific order of operations was considered as insecure. If escalated, the Sherlock team will decide what happens here
-
-
-
-# Issue M-28: Fee receiver does not get paid when collateral is enough to cover the funding fee, during liquidation 
+# Issue M-26: Fee receiver does not get paid when collateral is enough to cover the funding fee, during liquidation 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/146 
 
@@ -4393,6 +5420,8 @@ Split the fees properly in `getLiquidationValues()` and don't return early after
 
 
 
+
+
 ## Discussion
 
 **xvi10**
@@ -4403,9 +5432,7 @@ this is a valid concern, but we do not think that the contracts should be change
 
 I'm leaving this open since the fees are not paid
 
-
-
-# Issue M-29: Virtual impacts can be trivially bypassed via structuring 
+# Issue M-27: Virtual impacts can be trivially bypassed via structuring 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/145 
 
@@ -4461,7 +5488,15 @@ Manual Review
 Virtual price impact needs to always apply, in order to solve for the case of splitting a large order over multiple accounts. If orders split over multiple accounts is not a risk you want to address, the price impact should at least take into account the total position size for a single account when determining whether the threshold should apply.
 
 
-# Issue M-30: Collateral tokens that cannot be automatically swapped to the PnL token, cannot have slippage applied to them 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/116
+
+# Issue M-28: Collateral tokens that cannot be automatically swapped to the PnL token, cannot have slippage applied to them 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/144 
 
@@ -4524,7 +5559,15 @@ Manual Review
 
 Convert the USD value of `secondaryOutputAmount` to `outputAmount`, and ensure that the slippage checks against that total
 
-# Issue M-31: Users that have to claim collateral more than once for a time slot, may get the wrong total amount 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/108
+
+# Issue M-29: Users that have to claim collateral more than once for a time slot, may get the wrong total amount 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/142 
 
@@ -4603,12 +5646,20 @@ index 7624b69..3346296 100644
          MarketToken(payable(market)).transferOut(
 ```
 
-# Issue M-32: Deposits/Withdrawals/Orders will be canceled if created before feature is disabled and attempted to be executed after 
+
+
+## Discussion
+
+**xvi10**
+
+the claimableFactor should be set only after the time slot for the timeKey has passed, there is no validation on the contract for this currently, this validation will be added if necessary, this feature is excluded from the current scope
+
+# Issue M-30: Deposits/Withdrawals/Orders will be canceled if created before feature is disabled and attempted to be executed after 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/124 
 
 ## Found by 
-0xdeadbeef, rvierdiiev
+0xdeadbeef, IllIllI, csanuragjain, rvierdiiev
 
 ## Summary
 
@@ -4659,7 +5710,15 @@ For each operation:
 1. add a customer error to catch and revert the feature disable reason, like empty price is caught: https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/exchange/DepositHandler.sol#L190
 2. Add the feature check in the internal `DepositUtils.cancelDeposit` functions 
 
-# Issue M-33: Keeper can make deposits/orders/withdrawals fail and receive fee+rewards 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/51d1a7f161ab1b5081dc7cc5172ae30dfa063e1f
+
+# Issue M-31: Keeper can make deposits/orders/withdrawals fail and receive fee+rewards 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/116 
 
@@ -5071,12 +6130,26 @@ VS Code, foundry
 
 Add a buffer of gas that needs to be supplied to the execute function to make sure the `try` statement will not revert because of out of gas. 
 
-# Issue M-34: Multiplication after Division error leading to larger precision loss 
+
+
+## Discussion
+
+**xvi10**
+
+This is a valid issue but the risk of a keeper intentionally doing this should be low as there is not much benefit aside from possibly slightly higher execution fees received, a keeper network can help to reduce the risk of this and malicious keepers may be removed
+
+**xvi10**
+
+It is possible to introduce a minimum gas limit but it may be difficult to manage this such that it closely matches the actual gas required while remaining below the maximum block gas limit
+
+Allowing keepers to accurately estimate the gas limit off-chain may allow transactions to be executed faster as the transaction can more easily be included in blocks
+
+# Issue M-32: Multiplication after Division error leading to larger precision loss 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/113 
 
 ## Found by 
-IllIllI, joestakey, chaduke, Breeje, stopthecap
+Breeje, IllIllI, chaduke, joestakey, stopthecap
 
 ## Summary
 
@@ -5137,6 +6210,8 @@ Manual Review
 ## Recommendation
 
 First Multiply all the numerators and then divide it by the product of all the denominator.
+
+
 
 ## Discussion
 
@@ -5201,9 +6276,19 @@ Encountered a total of 1 failing tests, 1 tests succeeded
 
 i see, ok we can look into it
 
+**xvi10**
 
+looked into https://github.com/Uniswap/v3-core/blob/412d9b236a1e75a98568d49b1aeb21e3a1430544/contracts/libraries/FullMath.sol#L8, but the code needs to be updated to support Solidity ^0.8.0
 
-# Issue M-35: when execute deposit fails, cancel deposit will be called which means that execution fee for keeper will be little for executing the cancellation depending on where the executeDeposit fails 
+for now we have improved the precision of the calculations
+
+Fix in: https://github.com/gmx-io/gmx-synthetics/commit/93832021772e4020a66ac7260854eb6ace11230e, https://github.com/gmx-io/gmx-synthetics/commit/89f4e8cc8cddbd8d7f5925f032e0419d6b6228ee
+
+**xvi10**
+
+There is an implementation in the OpenZeppelin Math library, have updated the code to use that instead: https://github.com/gmx-io/gmx-synthetics/commit/26ecb0c125b1e8873d2f165d200b649b0ea0dcab
+
+# Issue M-33: when execute deposit fails, cancel deposit will be called which means that execution fee for keeper will be little for executing the cancellation depending on where the executeDeposit fails 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/89 
 
@@ -5269,12 +6354,349 @@ Manual Review
 ## Recommendation
 Recommend increasing the minimum required execution fee to account for failed deposit and refund the excess to the user when a deposit succeeds. 
 
-# Issue M-36: `getAdjustedLongAndShortTokenAmounts()` Incorrectly Calculates Amounts 
+
+
+## Discussion
+
+**xvi10**
+
+this is a valid issue, no code changed, the configuration for gas estimation should be updated to account for this
+
+# Issue M-34: The oracle price could be tampered 
+
+Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/74 
+
+## Found by 
+KingNFT
+
+## Summary
+The ````_setPrices()```` function is missing to check duplicated prices indexes. Attackers such as malicious order keepers can exploit it to tamper signed prices.
+
+## Vulnerability Detail
+The following test script shows how it works
+```typescript
+import { expect } from "chai";
+
+import { deployContract } from "../../utils/deploy";
+import { deployFixture } from "../../utils/fixture";
+import {
+  TOKEN_ORACLE_TYPES,
+  signPrices,
+  getSignerInfo,
+  getCompactedPrices,
+  getCompactedPriceIndexes,
+  getCompactedDecimals,
+  getCompactedOracleBlockNumbers,
+  getCompactedOracleTimestamps,
+} from "../../utils/oracle";
+import { printGasUsage } from "../../utils/gas";
+import { grantRole } from "../../utils/role";
+import * as keys from "../../utils/keys";
+
+describe("AttackOracle", () => {
+  const { provider } = ethers;
+
+  let user0, signer0, signer1, signer2, signer3, signer4, signer7, signer9;
+  let roleStore, dataStore, eventEmitter, oracleStore, oracle, wnt, wbtc, usdc;
+  let oracleSalt;
+
+  beforeEach(async () => {
+    const fixture = await deployFixture();
+    ({ user0, signer0, signer1, signer2, signer3, signer4, signer7, signer9 } = fixture.accounts);
+
+    ({ roleStore, dataStore, eventEmitter, oracleStore, oracle, wnt, wbtc, usdc } = fixture.contracts);
+    ({ oracleSalt } = fixture.props);
+  });
+
+  it("inits", async () => {
+    expect(await oracle.oracleStore()).to.eq(oracleStore.address);
+    expect(await oracle.SALT()).to.eq(oracleSalt);
+  });
+
+  it("tamperPrices", async () => {
+    const blockNumber = (await provider.getBlock()).number;
+    const blockTimestamp = (await provider.getBlock()).timestamp;
+    await dataStore.setUint(keys.MIN_ORACLE_SIGNERS, 2);
+    const block = await provider.getBlock(blockNumber);
+
+    let signerInfo = getSignerInfo([0, 1]);
+    let minPrices = [1000, 1000]; // if some signers sign a same price
+    let maxPrices = [1010, 1010]; // if some signers sign a same price
+    let signatures = await signPrices({
+      signers: [signer0, signer1],
+      salt: oracleSalt,
+      minOracleBlockNumber: blockNumber,
+      maxOracleBlockNumber: blockNumber,
+      oracleTimestamp: blockTimestamp,
+      blockHash: block.hash,
+      token: wnt.address,
+      tokenOracleType: TOKEN_ORACLE_TYPES.DEFAULT,
+      precision: 1,
+      minPrices,
+      maxPrices,
+    });
+
+    // attacker tamper the prices and indexes
+    minPrices[1] = 2000
+    maxPrices[1] = 2020
+    let indexes = getCompactedPriceIndexes([0, 0]) // share the same index
+
+    await oracle.setPrices(dataStore.address, eventEmitter.address, {
+      priceFeedTokens: [],
+      signerInfo,
+      tokens: [wnt.address],
+      compactedMinOracleBlockNumbers: [blockNumber],
+      compactedMaxOracleBlockNumbers: [blockNumber],
+      compactedOracleTimestamps: [blockTimestamp],
+      compactedDecimals: getCompactedDecimals([1]),
+      compactedMinPrices: getCompactedPrices(minPrices),
+      compactedMinPricesIndexes: indexes,
+      compactedMaxPrices: getCompactedPrices(maxPrices),
+      compactedMaxPricesIndexes: indexes,
+      signatures,
+    });
+
+    const decimals = 10
+    expect((await oracle.getPrimaryPrice(wnt.address)).min).eq(1500 * decimals);
+    expect((await oracle.getPrimaryPrice(wnt.address)).max).eq(1515 * decimals);
+  });
+
+});
+
+```
+
+The output
+```solidity
+> npx hardhat test .\test\oracle\AttackOracle.ts
+
+
+  AttackOracle
+    √ inits
+    √ tamperPrices (105ms)
+
+
+  2 passing (13s)
+```
+
+## Impact
+Steal funds from the vault and markets.
+
+## Code Snippet
+https://github.com/sherlock-audit/2023-02-gmx/blob/main/gmx-synthetics/contracts/oracle/Oracle.sol#L430
+```solidity
+File: contracts\oracle\Oracle.sol
+430:     function _setPrices(
+431:         DataStore dataStore,
+432:         EventEmitter eventEmitter,
+433:         address[] memory signers,
+434:         OracleUtils.SetPricesParams memory params
+435:     ) internal {
+436:         SetPricesCache memory cache;
+437:         cache.minBlockConfirmations = dataStore.getUint(Keys.MIN_ORACLE_BLOCK_CONFIRMATIONS);
+438:         cache.maxPriceAge = dataStore.getUint(Keys.MAX_ORACLE_PRICE_AGE);
+439: 
+440:         for (uint256 i = 0; i < params.tokens.length; i++) {
+441:             cache.info.minOracleBlockNumber = OracleUtils.getUncompactedOracleBlockNumber(params.compactedMinOracleBlockNumbers, i);
+442:             cache.info.maxOracleBlockNumber = OracleUtils.getUncompactedOracleBlockNumber(params.compactedMaxOracleBlockNumbers, i);
+443: 
+444:             if (cache.info.minOracleBlockNumber > cache.info.maxOracleBlockNumber) {
+445:                 revert InvalidMinMaxBlockNumber(cache.info.minOracleBlockNumber, cache.info.maxOracleBlockNumber);
+446:             }
+447: 
+448:             cache.info.oracleTimestamp = OracleUtils.getUncompactedOracleTimestamp(params.compactedOracleTimestamps, i);
+449: 
+450:             if (cache.info.minOracleBlockNumber > Chain.currentBlockNumber()) {
+451:                 revert InvalidBlockNumber(cache.info.minOracleBlockNumber);
+452:             }
+453: 
+454:             if (cache.info.oracleTimestamp + cache.maxPriceAge < Chain.currentTimestamp()) {
+455:                 revert MaxPriceAgeExceeded(cache.info.oracleTimestamp);
+456:             }
+457: 
+458:             // block numbers must be in ascending order
+459:             if (cache.info.minOracleBlockNumber < cache.prevMinOracleBlockNumber) {
+460:                 revert BlockNumbersNotSorted(cache.info.minOracleBlockNumber, cache.prevMinOracleBlockNumber);
+461:             }
+462:             cache.prevMinOracleBlockNumber = cache.info.minOracleBlockNumber;
+463: 
+464:             cache.info.blockHash = bytes32(0);
+465:             if (Chain.currentBlockNumber() - cache.info.minOracleBlockNumber <= cache.minBlockConfirmations) {
+466:                 cache.info.blockHash = Chain.getBlockHash(cache.info.minOracleBlockNumber);
+467:             }
+468: 
+469:             cache.info.token = params.tokens[i];
+470:             cache.info.precision = 10 ** OracleUtils.getUncompactedDecimal(params.compactedDecimals, i);
+471:             cache.info.tokenOracleType = dataStore.getBytes32(Keys.oracleTypeKey(cache.info.token));
+472: 
+473:             cache.minPrices = new uint256[](signers.length);
+474:             cache.maxPrices = new uint256[](signers.length);
+475: 
+476:             for (uint256 j = 0; j < signers.length; j++) {
+477:                 cache.priceIndex = i * signers.length + j;
+478:                 cache.minPrices[j] = OracleUtils.getUncompactedPrice(params.compactedMinPrices, cache.priceIndex);
+479:                 cache.maxPrices[j] = OracleUtils.getUncompactedPrice(params.compactedMaxPrices, cache.priceIndex);
+480: 
+481:                 if (j == 0) { continue; }
+482: 
+483:                 // validate that minPrices are sorted in ascending order
+484:                 if (cache.minPrices[j - 1] > cache.minPrices[j]) {
+485:                     revert MinPricesNotSorted(cache.info.token, cache.minPrices[j], cache.minPrices[j - 1]);
+486:                 }
+487: 
+488:                 // validate that maxPrices are sorted in ascending order
+489:                 if (cache.maxPrices[j - 1] > cache.maxPrices[j]) {
+490:                     revert MaxPricesNotSorted(cache.info.token, cache.maxPrices[j], cache.maxPrices[j - 1]);
+491:                 }
+492:             }
+493: 
+494:             for (uint256 j = 0; j < signers.length; j++) {
+495:                 cache.signatureIndex = i * signers.length + j;
+496:                 cache.minPriceIndex = OracleUtils.getUncompactedPriceIndex(params.compactedMinPricesIndexes, cache.signatureIndex);
+497:                 cache.maxPriceIndex = OracleUtils.getUncompactedPriceIndex(params.compactedMaxPricesIndexes, cache.signatureIndex);
+498: 
+499:                 if (cache.signatureIndex >= params.signatures.length) {
+500:                     Array.revertArrayOutOfBounds(params.signatures, cache.signatureIndex, "signatures");
+501:                 }
+502: 
+503:                 if (cache.minPriceIndex >= cache.minPrices.length) {
+504:                     Array.revertArrayOutOfBounds(cache.minPrices, cache.minPriceIndex, "minPrices");
+505:                 }
+506: 
+507:                 if (cache.maxPriceIndex >= cache.maxPrices.length) {
+508:                     Array.revertArrayOutOfBounds(cache.maxPrices, cache.maxPriceIndex, "maxPrices");
+509:                 }
+510: 
+511:                 cache.info.minPrice = cache.minPrices[cache.minPriceIndex];
+512:                 cache.info.maxPrice = cache.maxPrices[cache.maxPriceIndex];
+513: 
+514:                 if (cache.info.minPrice > cache.info.maxPrice) {
+515:                     revert InvalidSignerMinMaxPrice(cache.info.minPrice, cache.info.maxPrice);
+516:                 }
+517: 
+518:                 OracleUtils.validateSigner(
+519:                     SALT,
+520:                     cache.info,
+521:                     params.signatures[cache.signatureIndex],
+522:                     signers[j]
+523:                 ); // @audit dunplicated price
+524:             }
+525: 
+526:             uint256 medianMinPrice = Array.getMedian(cache.minPrices) * cache.info.precision;
+527:             uint256 medianMaxPrice = Array.getMedian(cache.maxPrices) * cache.info.precision;
+528: 
+529:             if (medianMinPrice == 0 || medianMaxPrice == 0) {
+530:                 revert InvalidOraclePrice(cache.info.token);
+531:             }
+532: 
+533:             if (medianMinPrice > medianMaxPrice) {
+534:                 revert InvalidMedianMinMaxPrice(medianMinPrice, medianMaxPrice);
+535:             }
+536: 
+537:             if (primaryPrices[cache.info.token].isEmpty()) {
+538:                 emitOraclePriceUpdated(eventEmitter, cache.info.token, medianMinPrice, medianMaxPrice, true, false);
+539: 
+540:                 primaryPrices[cache.info.token] = Price.Props(
+541:                     medianMinPrice,
+542:                     medianMaxPrice
+543:                 );
+544:             } else {
+545:                 emitOraclePriceUpdated(eventEmitter, cache.info.token, medianMinPrice, medianMaxPrice, false, false);
+546: 
+547:                 secondaryPrices[cache.info.token] = Price.Props(
+548:                     medianMinPrice,
+549:                     medianMaxPrice
+550:                 );
+551:             }
+552: 
+553:             tokensWithPrices.add(cache.info.token);
+554:         }
+555:     }
+
+```
+
+## Tool used
+
+Manual Review
+
+## Recommendation
+Don't allow duplicated prices indexes
+
+
+
+## Discussion
+
+**IllIllI000**
+
+@xvi10 can you confirm that this is invalid?
+
+**xvi10**
+
+it is a valid issue
+
+**IllIllI000**
+
+@hrishibhat agree with sponsor – valid Medium
+
+**ydspa**
+
+Escalate for 10 USDC
+
+agree with sponsor and @IllIllI000, it should be at least a valid Medium.
+
+As large amount of funds can be stolen , even the top privileged admins are not allowed to steal user's funds. So i insist a issue which can be triggered by keeper role to cause large loss of users is not Low/info.
+
+Especially, GMX may grant keeper role to third-party such as KeeperDAO
+https://forum.rook.fi/t/kip-17-provide-a-coordination-facility-for-gmx/272
+Or even worse, to make it public in the future.
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+> 
+> agree with sponsor and @IllIllI000, it should be at least a valid Medium.
+> 
+> As large amount of funds can be stolen , even the top privileged admins are not allowed to steal user's funds. So i insist a issue which can be triggered by keeper role to cause large loss of users is not Low/info.
+> 
+> Especially, GMX may grant keeper role to third-party such as KeeperDAO
+> https://forum.rook.fi/t/kip-17-provide-a-coordination-facility-for-gmx/272
+> Or even worse, to make it public in the future.
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**IllIllI000**
+
+I messed up the tagging - Valid solo Medium
+
+**hrishibhat**
+
+Escalation accepted
+
+Considering this issue a valid medium
+
+**sherlock-admin**
+
+> Escalation accepted
+> 
+> Considering this issue a valid medium
+
+This issue's escalations have been accepted!
+
+Contestants' payouts and scores will be updated according to the changes made on this issue.
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/122
+
+# Issue M-35: `getAdjustedLongAndShortTokenAmounts()` Incorrectly Calculates Amounts 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/72 
 
 ## Found by 
-kirk-baird, IllIllI, koxuan
+IllIllI, kirk-baird, koxuan
 
 ## Summary
 
@@ -5345,6 +6767,96 @@ The aim of the function is to reduce the difference between the `poolLongTokenAm
         }
 ```
 
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/commit/d4066840f925c43116eed3c2c83ae2e44be39eed
+
+# Issue M-36: _validateRange in Config does not check the input value as described 
+
+Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/49 
+
+## Found by 
+0xGoodess
+
+## Summary
+`_validateRange` in Config does not check the input value as described
+
+## Vulnerability Detail
+in the dev note of this function `_validateRange` : it said  `// @dev validate that the value is within the allowed range`. However in the function itself the value is only used in sending revert message, but not used in any check against a pre-set boundary.
+
+
+## Impact
+function does not verify the input value is within an expected range
+
+## Code Snippet
+
+https://github.com/gmx-io/gmx-synthetics/blob/8028cb8022b85174be861b311f1082b5b76239df/contracts/config/Config.sol#L271
+
+## Tool used
+
+Manual Review
+
+## Recommendation
+Retrieve the min/max of a baseKey and does checking.
+
+
+
+## Discussion
+
+**IllIllI000**
+
+@xvi10 can you confirm that this is invalid?
+
+**xvi10**
+
+it is a valid issue
+
+**IllIllI000**
+
+@hrishibhat agree with sponsor – valid Medium
+
+**chrisckwong821**
+
+Escalate for 10 USDC
+
+**sherlock-admin**
+
+ > Escalate for 10 USDC
+
+You've created a valid escalation for 10 USDC!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**IllIllI000**
+
+I messed up the tagging - Valid solo Medium
+
+**hrishibhat**
+
+Escalation accepted
+
+Considering this issue a valid medium
+
+**sherlock-admin**
+
+> Escalation accepted
+> 
+> Considering this issue a valid medium
+
+This issue's escalations have been accepted!
+
+Contestants' payouts and scores will be updated according to the changes made on this issue.
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/81
+
 # Issue M-37: There is no market enabled validation in Swap and CreateAdl activities 
 
 Source: https://github.com/sherlock-audit/2023-02-gmx-judging/issues/33 
@@ -5377,6 +6889,16 @@ Market.Props memory _market = MarketUtils.getEnabledMarket(dataStore, market);
 ```
 
 to swap and createAdl
+
+
+
+## Discussion
+
+**xvi10**
+
+for ADL, the market is validated in _getExecuteOrderParams called after AdlUtils.createAdlOrder
+
+for swaps, the swap path is fetched with getEnabledMarkets before calling the swap function
 
 # Issue M-38: boundedSub() might fail to return the result that is bounded to prevent overflows 
 
@@ -5469,4 +6991,12 @@ The correction is as follows:
 
 ```
 
+
+
+
+## Discussion
+
+**xvi10**
+
+Fix in https://github.com/gmx-io/gmx-synthetics/pull/110
 
